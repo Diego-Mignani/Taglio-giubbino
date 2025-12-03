@@ -1,0 +1,5 @@
+1. Riconoscimento cuciture/zip 											Lorenzo Vicomandi
+2. Trasformare in coordinate e sequenzialità Creazione della traiettoria (iniziare prima da un simulatore)	Diego Mignani		
+3. Controllo del robot												Alessandro Guenci			
+
+Individuati i tagli per pianificare ordine c'è algoritmo e fare vincoli di precedenza (prima zip)
