@@ -3,4 +3,3 @@
 3. Controllo del robot												Alessandro Guenci			
 
 Individuati i tagli per pianificare ordine c'è algoritmo e fare vincoli di precedenza (prima zip)
-...
