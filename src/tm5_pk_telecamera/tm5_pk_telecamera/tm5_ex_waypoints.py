@@ -92,9 +92,6 @@ class PointsGenerator(Node):
         line[:, 1] += wave * normal[1]
 
         return line
-
-
-
     
     def generate_pocket_square(self, size=0.1, z=0.1, n_per_side=20, noise=0.002):
         """
