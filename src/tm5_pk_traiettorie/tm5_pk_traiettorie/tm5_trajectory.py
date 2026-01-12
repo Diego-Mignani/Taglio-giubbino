@@ -7,6 +7,7 @@ from scipy.interpolate import splrep, splev
 from .types import CartesianTrajectoryPoint
 from std_msgs.msg import Float64MultiArray
 from my_robot_utils import kinematics
+import scipy.spatial.transform as tf
 
 class TrajectoryManager(Node):
     def __init__(self):
@@ -22,10 +23,13 @@ class TrajectoryManager(Node):
 
         self.kinematics = kinematics.KDLKinematics6DOF(self.robot_desc)
 
-        self.q_home = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        self.q_home = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]) # Da cambiare
+        self.Q_down = tf.Rotation.from_euler('x', -90, degrees=True).as_quat()
         
-        self.T_home = self.kinematics.fk_6dof(self.q_home)  # Da cambiare
+        self.T_home = self.kinematics.fk_6dof(self.q_home)  
         self.X_home = self.kinematics.position_from_T(self.T_home)
+        self.R_home = self.kinematics.rotation_from_T(self.T_home)
+        self.Q_home = self.kinematics.quaternion_from_R(self.R_home)
         # Subscriber per i waypoint generati dal PointsGenerator
         self.sub_trajectory = self.create_subscription(
             Float64MultiArray, 
@@ -179,13 +183,21 @@ class TrajectoryManager(Node):
     #  FUNZIONI INTERNE
     # ----------------------------------------------------------
 
-    def linear_cartesian_segment(self, X_start, X_end, dt, duration):
+    def linear_cartesian_segment(self, X_start, X_end, dt, duration, Q_start=None, Q_end=None):
         """Genera una traiettoria cartesiana lineare con velocità costante."""
         t = np.arange(0, duration, dt)
         Xd = X_start + np.outer(t / duration, (X_end - X_start))
         Xd_dot = np.tile((X_end - X_start) / duration, (len(t), 1))
         Xd_ddot = np.zeros_like(Xd)
         traj = []
+
+        if Q_start is not None:
+            Qd = []
+        for alpha in t / duration:
+            Qd.append(self.slerp(Q_start, Q_end, alpha))
+        else:
+            Qd = [None] * len(t)
+
         for i in range(len(t)):
             traj.append(CartesianTrajectoryPoint(t[i], Xd[i], Xd_dot[i], Xd_ddot[i]))
         return traj
@@ -201,6 +213,12 @@ class TrajectoryManager(Node):
         for i in range(1, len(points)):
             s[i] = s[i-1] + np.linalg.norm(points[i] - points[i-1])
         return s
+
+    def slerp(self, q0, q1, alpha):
+        r0 = tf.Rotation.from_quat(q0)
+        r1 = tf.Rotation.from_quat(q1)
+        return tf.Slerp([0,1], tf.Rotation.concatenate([r0, r1]))([alpha]).as_quat()[0]
+
 
     def _trapezoidal_time_scaling(self, L, vmax, amax):
         """

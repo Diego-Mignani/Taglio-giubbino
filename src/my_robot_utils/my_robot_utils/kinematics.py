@@ -1,7 +1,7 @@
 import numpy as np
 from my_robot_utils import urdf as kdl_parser
 from PyKDL import ChainFkSolverPos_recursive, ChainJntToJacSolver, Jacobian, JntArray, Frame
-
+from scipy.spatial.transform import Rotation as R
 
 class KDLKinematics6DOF:
     def __init__(self, robot_desc: str,
@@ -146,3 +146,16 @@ class KDLKinematics6DOF:
         if T.shape != (4, 4):
             raise ValueError("La matrice T deve essere di forma (4, 4)")
         return T[:3, 3]
+
+    def rotation_from_T(self, T):
+        """
+        Estrae la matrice di rotazione 3x3 da una matrice di trasformazione 4x4.
+        """
+        return T[0:3, 0:3]
+
+    def quaternion_from_R(self, R_mat):
+        """
+        Converte una matrice di rotazione 3x3 in un quaternione [x, y, z, w].
+        """
+        rot = R.from_matrix(R_mat)
+        return rot.as_quat()   # formato [x, y, z, w]
