@@ -12,6 +12,7 @@ import scipy.spatial.transform as tf
 class TrajectoryManager(Node):
     def __init__(self):
         super().__init__('tm5_gestione_traiettoria')
+        
         self.dt = 0.033
         self.received_waypoint = None
         self.trajectory_ready = False
@@ -19,17 +20,18 @@ class TrajectoryManager(Node):
         # 1. PARAMETRI E KDL
         self.declare_parameter('robot_description', '')
         self.robot_desc = self.get_parameter('robot_description').get_parameter_value().string_value
-        
+        print("DEBUG robot_description:", self.robot_desc)
+
 
         self.kinematics = kinematics.KDLKinematics6DOF(self.robot_desc)
 
         self.q_home = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]) # Da cambiare
-        self.Q_down = tf.Rotation.from_euler('x', -90, degrees=True).as_quat()
+        self.Q_down = tf.Rotation.from_euler('x', 180, degrees=True).as_quat()  #orientazione per andare giu
         
         self.T_home = self.kinematics.fk_6dof(self.q_home)  
         self.X_home = self.kinematics.position_from_T(self.T_home)
         self.R_home = self.kinematics.rotation_from_T(self.T_home)
-        self.Q_home = self.kinematics.quaternion_from_R(self.R_home)
+        self.Q_home = self.kinematics.quaternion_from_R(self.R_home)   #90 0 0   offset x è 90
         # Subscriber per i waypoint generati dal PointsGenerator
         self.sub_trajectory = self.create_subscription(
             Float64MultiArray, 
@@ -51,12 +53,6 @@ class TrajectoryManager(Node):
         # Ignora se la traiettoria è già stata processata e per errore il publisher invia di nuovo
         if self.trajectory_ready:
             return
-        # Ricostruiamo la matrice N x 3
-        #data = np.array(msg.data)
-        #self.received_waypoint = data.reshape(-1, 3) 
-        #self.get_logger().info('Waypoint ricevuti.')
-        #self.trajectory_builder()
-
 
         data = np.array(msg.data)
 
@@ -76,13 +72,12 @@ class TrajectoryManager(Node):
         
         """
 
-        #self.tracking_traj = self.plan_from_points(self.received_waypoint)
-
         self.tracking_traj1 = self.plan_from_points(self.pts1)
         self.tracking_traj2 = self.plan_from_points(self.pts2)
 
         X_first1 = self.tracking_traj1[0].X
         X_last1 = self.tracking_traj1[-1].X
+
         X_first2 = self.tracking_traj2[0].X
         X_last2 = self.tracking_traj2[-1].X
 
@@ -90,39 +85,39 @@ class TrajectoryManager(Node):
         # APPROACH (home → primo punto)
         # -------------------------------
         approach_traj1 = self.linear_cartesian_segment(
-            self.X_home, X_first1, self.dt, duration=1.5
+            self.X_home, X_first1, self.dt, duration=1.5 , Q=self.Q_home
         )
 
         # -------------------------------
         # RETREAT (ultimo punto → home)
         # -------------------------------
         retreat_traj1 = self.linear_cartesian_segment(
-            X_last1, self.X_home, self.dt, duration=1.5
+            X_last1, self.X_home, self.dt, duration=1.5 , Q=self.Q_down
         )
-
+        
         # -------------------------------
         # APPROACH (home → primo punto)
         # -------------------------------
         approach_traj2 = self.linear_cartesian_segment(
-            self.X_home, X_first2, self.dt, duration=1.5
+            self.X_home, X_first2, self.dt, duration=1.5 , Q=self.Q_down
         )
 
         # -------------------------------
         # RETREAT (ultimo punto → home)
         # -------------------------------
         retreat_traj2 = self.linear_cartesian_segment(
-            X_last2, self.X_home, self.dt, duration=1.5
+            X_last2, self.X_home, self.dt, duration=1.5 , Q=self.Q_home
         )
-
-
 
         # traiettoria totale: approach + tracking + retreat
         full_traj = approach_traj1 + self.tracking_traj1 + retreat_traj1 + approach_traj2 + self.tracking_traj2 + retreat_traj2
+        
         # --- SERIALIZZAZIONE PER ROS 2 ---
         # Creiamo un'unica lista piatta: [t1, x1, y1, z1, vx1, vy1, vz1, ax1, ay1, az1, t2, x2, ...]
         flat_data = []
         for p in full_traj:
-            flat_data.extend([p.t, *p.X, *p.Xdot, *p.Xddot])
+            flat_data.extend([p.t, *p.X, *p.Xdot, *p.Xddot,*p.Q])
+            #flat_data.extend([p.t, *p.X, *p.Xdot, *p.Xddot])
         
         msg = Float64MultiArray()
         msg.data = flat_data
@@ -132,7 +127,8 @@ class TrajectoryManager(Node):
         # Pubblica solo X,Y,Z per Unity
         flat_xyz = []
         for p in full_traj:
-            flat_xyz.extend([p.X[0], p.X[1], p.X[2]])
+            flat_xyz.extend([p.X[0], p.X[1], p.X[2],*p.Q])
+            #flat_xyz.extend([p.X[0], p.X[1], p.X[2]])
 
         msg_xyz = Float64MultiArray()
         msg_xyz.data = flat_xyz
@@ -140,7 +136,7 @@ class TrajectoryManager(Node):
 
  
  
-    def plan_from_points(self, points_3d, vmax=0.2, amax=0.5, smooth=0.01):
+    def plan_from_points(self, points_3d, vmax=0.2, amax=0.5, jmax=0.8, smooth=0.01):
         """
         Genera una traiettoria liscia e time-scaled dai punti dati.
 
@@ -160,6 +156,7 @@ class TrajectoryManager(Node):
 
         # 3) time-scaling trapezoidale
         t, s_t, v_t, a_t = self._trapezoidal_time_scaling(L, vmax, amax)
+        #t, s_t, v_t, a_t = self._trapezoidal_acceleration_profile(L, amax, jmax)
 
         # 4) valutazione Xd, Xd_dot, Xd_ddot
         Xd, Xd_dot, Xd_ddot = self.evaluate_trajectory(tck_x, tck_y, tck_z,
@@ -173,7 +170,8 @@ class TrajectoryManager(Node):
                     t=t[i],
                     X=Xd[i],
                     Xdot=Xd_dot[i],
-                    Xddot=Xd_ddot[i]
+                    Xddot=Xd_ddot[i],
+                    Q=self.Q_down
                 )
             )
 
@@ -183,24 +181,19 @@ class TrajectoryManager(Node):
     #  FUNZIONI INTERNE
     # ----------------------------------------------------------
 
-    def linear_cartesian_segment(self, X_start, X_end, dt, duration, Q_start=None, Q_end=None):
-        """Genera una traiettoria cartesiana lineare con velocità costante."""
+    def linear_cartesian_segment(self, X_start, X_end, dt, duration, Q=None):
         t = np.arange(0, duration, dt)
         Xd = X_start + np.outer(t / duration, (X_end - X_start))
         Xd_dot = np.tile((X_end - X_start) / duration, (len(t), 1))
         Xd_ddot = np.zeros_like(Xd)
+
         traj = []
 
-        if Q_start is not None:
-            Qd = []
-        for alpha in t / duration:
-            Qd.append(self.slerp(Q_start, Q_end, alpha))
-        else:
-            Qd = [None] * len(t)
-
         for i in range(len(t)):
-            traj.append(CartesianTrajectoryPoint(t[i], Xd[i], Xd_dot[i], Xd_ddot[i]))
+            traj.append(CartesianTrajectoryPoint(t[i], Xd[i], Xd_dot[i], Xd_ddot[i], Q = Q))
+
         return traj
+
 
 
     def _compute_s(self, points):
@@ -263,6 +256,91 @@ class TrajectoryManager(Node):
 
         return t, s_t, v_t, a_t
 
+    def _trapezoidal_acceleration_profile(self, L, amax, jmax):
+        """
+        Profilo trapezoidale in accelerazione (jerk costante).
+        a(t) = trapezoidale
+        v(t) = ∫ a(t)
+        s(t) = ∫ v(t)
+
+        :param L: lunghezza totale
+        :param amax: accelerazione massima
+        :param jmax: jerk massimo
+        """
+
+        # 1) Tempi delle fasi
+        t_j = amax / jmax          # tempo per raggiungere amax
+        t_a = t_j                  # simmetrico
+        t_flat = 0                 # fase a accelerazione costante
+
+        # 2) Spazio durante salita + discesa accelerazione
+        # a sale linearmente → v è parabola → s è cubica
+        s_j = (1/6) * jmax * t_j**3
+        s_acc = 2 * s_j            # salita + discesa
+
+        # 3) Se non basta per coprire L, aggiungi fase piatta
+        if s_acc < L:
+            s_flat = L - s_acc
+            # velocità raggiunta al termine della salita
+            v_peak = 0.5 * jmax * t_j**2
+            if not np.isfinite(v_peak) or v_peak <= 0:
+                raise ValueError(f"Invalid v_peak: {v_peak}")
+            t_flat = s_flat / v_peak
+            if not np.isfinite(t_flat) or t_flat < 0:
+                raise ValueError(f"Invalid t_flat: {t_flat}")
+
+        else:
+            # profilo triangolare in accelerazione
+            t_j = (L * 3 / jmax)**(1/3)
+            t_a = t_j
+            t_flat = 0
+
+        # 4) Tempo totale
+        T = 2*t_j + t_flat
+        if not np.isfinite(T) or T <= 0:
+            raise ValueError(f"Invalid total time T: {T}")
+
+        t = np.arange(0, T, self.dt)
+
+        # 5) Preallocazione
+        a_t = np.zeros_like(t)
+        v_t = np.zeros_like(t)
+        s_t = np.zeros_like(t)
+
+        # 6) Costruzione profilo
+        for i, ti in enumerate(t):
+
+            if ti < t_j:
+                # fase 1: jerk positivo
+                a = jmax * ti
+                v = 0.5 * jmax * ti**2
+                s = (1/6) * jmax * ti**3
+
+            elif ti < t_j + t_flat:
+                # fase 2: accelerazione costante
+                dt = ti - t_j
+                a = amax
+                v = (0.5 * jmax * t_j**2) + amax * dt
+                s = (1/6)*jmax*t_j**3 + (0.5*jmax*t_j**2)*dt + 0.5*amax*dt**2
+
+            else:
+                # fase 3: jerk negativo
+                dt = ti - (t_j + t_flat)
+                a = amax - jmax * dt
+                v = (0.5*jmax*t_j**2 + amax*t_flat) + (amax*dt - 0.5*jmax*dt**2)
+                s = (1/6)*jmax*t_j**3 + (0.5*jmax*t_j**2)*t_flat + 0.5*amax*t_flat**2 \
+                    + (0.5*jmax*t_j**2)*dt + 0.5*amax*dt**2 - (1/6)*jmax*dt**3
+
+            a_t[i] = a
+            v_t[i] = v
+            s_t[i] = s
+            if not np.isfinite(s_t).all():
+                raise ValueError("s_t contains invalid values")
+
+
+        return t, s_t, v_t, a_t
+
+
     def evaluate_trajectory(self, tck_x, tck_y, tck_z, s_t, v_t, a_t):
         """
         Calcola posizione, velocità e accelerazione lungo la traiettoria.
@@ -274,6 +352,11 @@ class TrajectoryManager(Node):
         :param v_t: velocità lungo la traiettoria
         :param a_t: accelerazione lungo la traiettoria
         """
+
+        s_min = tck_x[0][0]
+        s_max = tck_x[0][-1]
+        s_t = np.clip(s_t, s_min, s_max)
+
         x = splev(s_t, tck_x, der=0)
         y = splev(s_t, tck_y, der=0)
         z = splev(s_t, tck_z, der=0)
@@ -317,4 +400,3 @@ def main():
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()

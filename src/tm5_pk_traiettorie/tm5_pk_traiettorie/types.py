@@ -7,9 +7,10 @@ class CartesianTrajectoryPoint:
     X: np.ndarray      # shape (3,) ora, (6,) in futuro
     Xdot: np.ndarray   # shape (3,)
     Xddot: np.ndarray  # shape (3,)
-    Q : np.ndarray = None   # quaternione
-    W : np.ndarray = None   # velocità angolare
-    Wdot : np.ndarray = None # accellerazione angolare
+    Q : np.ndarray = None   
+    W : np.ndarray = None
+    W_dot : np.ndarray = None
+
 
 @dataclass
 class Joint:

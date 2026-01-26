@@ -54,7 +54,6 @@ def main(args=None):
         pass
     finally:
         nodo.destroy_node()
-        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

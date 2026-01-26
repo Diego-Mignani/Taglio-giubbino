@@ -2,9 +2,34 @@ import numpy as np
 from tm5_pk_traiettorie.types import CartesianTrajectoryPoint
 from sensor_msgs.msg import JointState
 from my_robot_utils import kinematics
+from scipy.spatial.transform import Rotation as R
+
+
+from scipy.spatial.transform import Rotation as R
+
+def compute_angular_velocity(Q_prev, Q_curr, dt):
+    """
+    Q_prev, Q_curr: [x, y, z, w]
+    """
+    Q_prev = np.array(Q_prev, dtype=float)
+    Q_curr = np.array(Q_curr, dtype=float)
+
+    R_prev = R.from_quat(Q_prev)
+    R_curr = R.from_quat(Q_curr)
+
+    R_rel = R_curr * R_prev.inv()
+    rotvec = R_rel.as_rotvec()  # asse * angolo
+
+    if dt <= 0:
+        return np.zeros(3)
+
+    return rotvec / dt
+
+
+
 
 class JointSpaceController6DOF:
-    def __init__(self, Kp: np.ndarray, Kd: np.ndarray, dt: float, robot_desc: str):
+    def __init__(self, Kp: np.ndarray, Kd: np.ndarray, dt: float, robot_desc: str, K_ori=1.0, w_ori=1.0):
         """
         Kp, Kd: matrici 6x6 (tipicamente diagonali)
         """
@@ -14,6 +39,8 @@ class JointSpaceController6DOF:
         self.qd_dot_prev = np.zeros(6)
         self.kinematics = kinematics.KDLKinematics6DOF(robot_desc)
         self.error_history = []
+        self.K_ori = K_ori 
+        self.w_ori = w_ori
 
          # nel __init__
         self.qd_prev = np.zeros(6)
@@ -22,72 +49,87 @@ class JointSpaceController6DOF:
         self.alpha_qd_dot = 0.2  # filtro su velocità desiderata
 
 
-    #---------------------------------------------------------
-    #    CONTROLLO ALESSANDRO SPAZIO DEI GIUNTI
-    #--------------------------------------------------------
-    def compute_command(self, js: JointState, Xd, Xd_dot, Xd_ddot):
+    def compute_command(self, js: JointState, Xd, Xd_dot, Xd_ddot, Qd):
         q = np.array(js.position)
         q_dot = np.array(js.velocity)
         if len(q_dot) == 0:
             q_dot = np.zeros_like(q)
 
-        # 1. IK -> qd
-        #qd = self.kinematics.ik_position(Xd, q_seed=q)
+        # === FK: stato attuale ===
+        T = self.kinematics.fk_6dof(q)
+        X_actual = self.kinematics.position_from_T(T)
+        R_act = self.kinematics.rotation_from_T(T)
+        q_actual = self.kinematics.quaternion_from_R(R_act)
+
         
-        # 1. IK -> qd (grezzo)
+
+        rpy_des = R.from_quat(Qd).as_euler('xyz', degrees=True)
+        rpy_act = R.from_quat(q_actual).as_euler('xyz', degrees=True)
+        print(f"RPY_des={rpy_des}, RPY_act={rpy_act}")
+
+
+        # === Errori cartesiani ===
+        e_pos = Xd - X_actual
+        e_ori = self.kinematics.quat_error(Qd, q_actual)
+        e_ori = self.kinematics.quat_error(Qd, q_actual)
+        e_ori = self.w_ori * e_ori
+        e_ori = np.clip(e_ori, -0.6, 0.6)
+
+
+        # === 1) IK SOLO POSIZIONE ===
         qd_raw = self.kinematics.ik_position(Xd, q_seed=q)
 
-         # Filtro su qd per evitare salti dall'IK 
-        if not hasattr(self, "qd_prev"): 
+        # === 1b) CORREZIONE ORIENTAZIONE SOPRA qd_raw ===
+        J_full_qd = self.kinematics.get_full_jacobian(qd_raw)
+        J_omega = J_full_qd[3:6, :]
+
+        delta_q_ori = self.K_ori * np.linalg.pinv(J_omega) @ e_ori
+        qd_raw += delta_q_ori
+        qd_raw = qd_raw + delta_q_ori
+
+        # === filtro su qd ===
+        if not hasattr(self, "qd_prev"):
             self.qd_prev = qd_raw.copy()
 
-        # filtro semplice per evitare salti da IK
         qd = self.qd_prev + self.alpha_qd * (qd_raw - self.qd_prev)
         self.qd_prev = qd.copy()
 
-        # 2. J(qd) -> qd_dot (grezzo)
+        # === 2) velocità desiderata (posizione + orientazione) ===
         J_full = self.kinematics.get_full_jacobian(qd)
-        J_pos = J_full[:3, :]
 
-        U, S, Vt = np.linalg.svd(J_pos, full_matrices=False)
+        if not hasattr(self, "Qd_prev"):
+            self.Qd_prev = Qd.copy()
 
-        lambda2 = 1e-4  # damping
-        S_damped = S / (S**2 + lambda2)
-        J_pos_pinv = (Vt.T * S_damped) @ U.T
+        omega_d = compute_angular_velocity(self.Qd_prev, Qd, self.dt)
+        self.Qd_prev = Qd.copy()
 
-        qd_dot_raw = J_pos_pinv @ Xd_dot
+        Vd = np.hstack([Xd_dot, omega_d])   # [vx, vy, vz, wx, wy, wz]
+        qd_dot_raw = np.linalg.pinv(J_full) @ Vd
 
-        # Limita le velocità desiderate
-        max_qd_dot = 1.5  # rad/s, da tarare
+        max_qd_dot = 3.0
         qd_dot_raw = np.clip(qd_dot_raw, -max_qd_dot, max_qd_dot)
 
-         # Filtro su qd_dot 
-        if not hasattr(self, "qd_dot_prev_filt"): 
+        # === filtro su qd_dot ===
+        if not hasattr(self, "qd_dot_prev_filt"):
             self.qd_dot_prev_filt = qd_dot_raw.copy()
 
-        # filtro su velocità desiderata
         qd_dot = self.qd_dot_prev_filt + self.alpha_qd_dot * (qd_dot_raw - self.qd_dot_prev_filt)
         self.qd_dot_prev_filt = qd_dot.copy()
 
-        # 3. qd_ddot numerica
+        # === accelerazione desiderata ===
         qd_ddot = (qd_dot - self.qd_dot_prev) / self.dt
         self.qd_dot_prev = qd_dot.copy()
+        qd_ddot = np.clip(qd_ddot, -20, 20)
 
-        max_qd_ddot = 10.0  # rad/s^2, da tarare
-        qd_ddot = np.clip(qd_ddot, -max_qd_ddot, max_qd_ddot)
-
-
+        # === PD in giunto ===
         e_q = qd - q
         e_qdot = qd_dot - q_dot
-        #u = qd_ddot + self.Kp @ e_q + self.Kd @ e_qdot
-        u = self.Kp @ e_q + self.Kd @ e_qdot
+        u = qd_ddot + self.Kp @ e_q + self.Kd @ e_qdot
 
+        self.error_history.append(np.linalg.norm(e_q))
 
-        error_norm = np.linalg.norm(e_q)
-        self.error_history.append(error_norm)
-
-    
         return u, qd, qd_dot, qd_ddot
+
 
 
 
@@ -133,13 +175,13 @@ class JointSpaceController6DOF:
         return q_cmd, qd, qd_dot
 
 
-    #---------------------------------------------------------
-    #    CONTROLLO ALESSANDRO SPAZIO OPERATIVO FEEDBACK GIUNTI
+     #---------------------------------------------------------
+    #    CONTROLLO SPAZIO OPERATIVO CON JACOBIANO DAMPED
     #--------------------------------------------------------
     def compute_command_so(self, js: JointState, traj_point: CartesianTrajectoryPoint):
         """
         Controllo in spazio operativo (cartesiano) con comando in velocità dei giunti.
-        Funziona molto meglio in Unity rispetto al controllo in giunto.
+        Versione robusta con pseudoinversa smorzata del Jacobiano.
         """
 
         # --- Stato reale ---
@@ -152,26 +194,44 @@ class JointSpaceController6DOF:
 
         # --- Jacobiano ---
         J = self.kinematics.get_full_jacobian(q)
-        J_pos = J[:3, :]   # parte lineare
+        J_pos = J[:3, :]   # parte lineare (3x6)
 
         # --- Traiettoria desiderata ---
-        Xd = traj_point.X
+        Xd     = traj_point.X
         Xd_dot = traj_point.Xdot
 
         # --- Errori cartesiani ---
-        e_x = Xd - X
+        e_x    = Xd - X
         e_xdot = Xd_dot - (J_pos @ q_dot)
 
         # --- Controllo cartesiano ---
-        # Xdot_cmd = Xd_dot + Kp*e_x + Kd*e_xdot
-        Xdot_cmd = Xd_dot + self.Kp[:3,:3] @ e_x + self.Kd[:3,:3] @ e_xdot
+        Xdot_cmd = Xd_dot + self.Kp[:3, :3] @ e_x + self.Kd[:3, :3] @ e_xdot
 
-        # --- Converti in velocità giunti ---
-        J_pinv = np.linalg.pinv(J_pos, rcond=1e-2)
-        qdot_cmd = J_pinv @ Xdot_cmd
+        # --- Pseudoinversa smorzata del Jacobiano ---
+        # J_pos: 3x6
+        U, S, Vt = np.linalg.svd(J_pos, full_matrices=False)
+        lambda2 = 1e-4  # damping, da tarare
+        S_damped = S / (S**2 + lambda2)
+        J_pos_pinv = (Vt.T * S_damped) @ U.T   # 6x3
+
+        # --- Velocità di giunto comandata ---
+        qdot_cmd_raw = J_pos_pinv @ Xdot_cmd   # 6x1
+
+        # (opzionale) saturazione e filtro
+        max_qdot = 1.5  # rad/s, da tarare
+        qdot_cmd_raw = np.clip(qdot_cmd_raw, -max_qdot, max_qdot)
+
+        if not hasattr(self, "qdot_cmd_prev"):
+            self.qdot_cmd_prev = qdot_cmd_raw.copy()
+
+        alpha_qdot = 0.3  # filtro low-pass, da tarare
+        qdot_cmd = self.qdot_cmd_prev + alpha_qdot * (qdot_cmd_raw - self.qdot_cmd_prev)
+        self.qdot_cmd_prev = qdot_cmd.copy()
+
+        error_norm = np.linalg.norm(e_x)
+        self.error_history.append(error_norm)
 
         return qdot_cmd
-
 
 
     #---------------------------------------------------------

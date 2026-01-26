@@ -13,13 +13,18 @@ def generate_launch_description():
     with open(urdf_file, 'r') as infp:
         robot_desc = infp.read()
 
+     # Percorso del file YAML dei guadagni 
+    controller_pkg = get_package_share_directory('tm5_pk_controllore') 
+    gains_yaml = os.path.join(controller_pkg, 'config', 'controller_gains.yaml')
+
     return LaunchDescription([
-        
         Node(
             package='ros_tcp_endpoint',
             executable='default_server_endpoint',
             name='unity_endpoint',
-            parameters=[{'ROS_IP': '0.0.0.0'}]
+            parameters=[
+                {'ROS_IP': '0.0.0.0'},
+            ]
         ),
 
         Node(
@@ -29,12 +34,16 @@ def generate_launch_description():
             output='screen',
         ),
 
-        Node(
-            package='tm5_pk_controllore',
-            executable='controlla_robot',
-            name='tm5_robot_controller',
-            output='screen',
-            parameters=[{'robot_description': robot_desc}]
+        Node( 
+            package='tm5_pk_controllore', 
+            executable='controlla_robot', 
+            name='tm5_robot_controller', 
+            output='screen', 
+            parameters=[
+                gains_yaml,
+                {'robot_description': robot_desc}
+            ]
+
         ),
 
         Node(
@@ -51,6 +60,7 @@ def generate_launch_description():
             output='screen',
             parameters=[{'robot_description': robot_desc}]
         ),
+
     ])
 
 

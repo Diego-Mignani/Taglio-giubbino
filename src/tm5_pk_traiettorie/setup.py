@@ -25,6 +25,11 @@ setup(
     entry_points={
         'console_scripts': [
             'genera_traiettorie = tm5_pk_traiettorie.tm5_trajectory:main',
+            'plot_trajectory = tm5_pk_traiettorie.tm5_plotter:main',
         ],
+
     },
 )
+
+
+

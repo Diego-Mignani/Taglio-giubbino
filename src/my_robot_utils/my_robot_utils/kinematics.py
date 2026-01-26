@@ -132,7 +132,6 @@ class KDLKinematics6DOF:
 
             q += dq
 
-
         return q
     
     def position_from_T(self, T):
@@ -159,3 +158,19 @@ class KDLKinematics6DOF:
         """
         rot = R.from_matrix(R_mat)
         return rot.as_quat()   # formato [x, y, z, w]
+
+    def quat_error(self, qd, q):
+        q_inv = np.array([-q[0], -q[1], -q[2], q[3]])
+        qe = np.array([
+            qd[3]*q_inv[0] + qd[0]*q_inv[3] + qd[1]*q_inv[2] - qd[2]*q_inv[1],
+            qd[3]*q_inv[1] - qd[0]*q_inv[2] + qd[1]*q_inv[3] + qd[2]*q_inv[0],
+            qd[3]*q_inv[2] + qd[0]*q_inv[1] - qd[1]*q_inv[0] + qd[2]*q_inv[3],
+            qd[3]*q_inv[3] - qd[0]*q_inv[0] - qd[1]*q_inv[1] - qd[2]*q_inv[2]
+        ])
+
+        angle = 2 * np.arccos(qe[3])
+        if angle < 1e-6:
+            return np.zeros(3)
+
+        axis = qe[:3] / np.sin(angle/2)
+        return angle * axis

@@ -8,8 +8,10 @@ from std_msgs.msg import Bool
 class PointsGenerator(Node):
     def __init__(self):
         super().__init__('tm5_generatore_punti')
+        
         # Canale di pubblicazione dei waypoint
         self.publisher_ = self.create_publisher(Float64MultiArray, 'waypoint', 10)
+        
         # Subscriber per il segnale di pronto
         self.ready_to_send = False
         self.create_subscription(Bool, 'robot_ready', self.ready_callback, 10)
@@ -22,55 +24,38 @@ class PointsGenerator(Node):
         """
         Invia i punti generati assicurandosi che ci sia un ricevitore.
         """
-
         self.get_logger().info('In attesa del segnale READY dal controller (Unity deve essere in Play)...')
-    
-        # Aspetta il segnale di handshake
-        while not self.ready_to_send:
-            rclpy.spin_once(self, timeout_sec=0.1) # Permette alla callback di essere eseguita
-            if not rclpy.ok(): return False
 
+         # Aspetta finché Unity non manda unity_ready = True 
+        while rclpy.ok() and not self.ready_to_send: 
+            rclpy.spin_once(self, timeout_sec=0.1) 
+            time.sleep(0.1) 
+            
         # Una volta ricevuto il segnale, invia i punti
         msg = Float64MultiArray()
         msg.data = points.flatten().tolist()
         self.publisher_.publish(msg)
         self.get_logger().info(f'Handshake completato. Inviati {len(points)} punti.')
+
+        # Conferma che l'invio è avvenuto con successo
         return True
-
-    def generate_zip_curve(self, n_points=50, noise=0.005):
-        """
-        Genera una curva morbida tipo zip.
-
-        :param n_points: numero di punti da generare
-        :param noise: ampiezza del rumore da aggiungere
-        """
-        t = np.linspace(0, 2*np.pi, n_points)
-        x = 0.4 + 0.1*np.cos(t)
-        y = 0.2 + 0.05*np.sin(2*t)
-        z = 0.15*np.ones(n_points)
-
-        # rumore simulato
-        x += noise*np.random.randn(n_points)
-        y += noise*np.random.randn(n_points)
-
-        return np.vstack([x, y, z]).T
     
+    def ros_to_unity_position(self, p_ros):
+        '''
+        Converte le posizioni dal frame di ROS2 al frame di Unity
+        ''' 
+        p_ros = np.asarray(p_ros) 
+        p_unity = np.zeros_like(p_ros) 
+        p_unity[:,0] = -p_ros[:,0]  # Unity.x = ROST.x= -ROS.x
+        p_unity[:,1] = -p_ros[:,1]  # Unity.z = ROST.y = -ROS.y
+        p_unity[:,2] = p_ros[:,2]   # Unity.y = ROST.z = ROS.z
+        return p_unity
 
-    def generate_wavy_trajectory_oblique(self,
-            start=np.array([0.3, 0.0, 0.15]),
-            end=np.array([0.9, 0.5, 0.15]),
-            num_points=100,
-            amplitude=0.02,
-            frequency=3.0):
+    def generate_wavy_trajectory_oblique(self, start=np.array([0.3, 0.0, 0.15]), end=np.array([0.9, 0.5, 0.15]),
+                                        num_points=100, amplitude=0.02, frequency=3.0):
         """
         Genera una traiettoria obliqua nel piano X-Y con ondulazione sinusoidale.
 
-        :param start: punto iniziale [x,y,z]
-        :param end: punto finale [x,y,z]
-        :param num_points: numero di punti
-        :param amplitude: ampiezza dell'ondulazione
-        :param frequency: frequenza dell'onda
-        :return: array Nx3 di punti [x, y, z]
         """
 
         # 1. Parametrizzazione lineare della retta
@@ -91,66 +76,13 @@ class PointsGenerator(Node):
         line[:, 0] += wave * normal[0]
         line[:, 1] += wave * normal[1]
 
-        return line
+        return self.ros_to_unity_position(line)
     
-    def generate_pocket_square(self, size=0.1, z=0.1, n_per_side=20, noise=0.002):
-        """
-        Genera una tasca quadrata con angoli smussati.
-
-        :param size: dimensione del lato del quadrato
-        :param z: altezza costante della tasca
-        :param n_per_side: numero di punti per lato
-        :param noise: ampiezza del rumore da aggiungere
-        """
-        s = size
-        pts = []
-
-        # lato 1
-        for i in range(n_per_side):
-            pts.append([0, i*(s/n_per_side), z])
-
-        # lato 2
-        for i in range(n_per_side):
-            pts.append([i*(s/n_per_side), s, z])
-
-        # lato 3
-        for i in range(n_per_side):
-            pts.append([s, s - i*(s/n_per_side), z])
-
-        # lato 4
-        for i in range(n_per_side):
-            pts.append([s - i*(s/n_per_side), 0, z])
-
-        pts = np.array(pts)
-
-        # rumore
-        pts[:,0] += noise*np.random.randn(len(pts))
-        pts[:,1] += noise*np.random.randn(len(pts))
-
-        return pts
-    
-    def ros_to_unity_position(self, p_ros): 
-        p_ros = np.asarray(p_ros) 
-        p_unity = np.zeros_like(p_ros)
-        p_unity[:,0] = -p_ros[:,0] # Unity.x = ROST.x= -ROS.x
-        p_unity[:,1] = -p_ros[:,1] # Unity.z = ROST.y = -ROS.y
-        p_unity[:,2] = p_ros[:,2] # Unity.y = ROST.z = ROS.z
-        return p_unity
-    
-    def generate_pocket_square2(self, 
-                            width=0.12, 
-                            height=0.18, 
-                            z=0.15, 
-                            n_per_side=25, 
-                            noise=0.002,
-                            offset_x=0.5,
-                            offset_y=0.3):
+    def generate_pocket_square2(self, width=0.12, height=0.18, z=0.15, n_per_side=25, 
+                                noise=0.002, offset_x=0.5, offset_y=0.3):
         """
         Genera una traiettoria che simula la tasca di un giubbotto:
-        - rettangolare verticale
-        - angoli smussati
-        - bordo superiore leggermente arcuato
-        - spostata lontano dall'origine
+
         """
 
         w = width
@@ -191,20 +123,17 @@ class PointsGenerator(Node):
         pts[:,0] += offset_x
         pts[:,1] += offset_y
 
-        return pts
+        return self.ros_to_unity_position(pts)
 
 def main():
     rclpy.init()
     node = PointsGenerator()
     try:
-        punti1 = node.generate_wavy_trajectory_oblique()
-        punti2 = node.generate_pocket_square2()
-
-        punti1 = node.ros_to_unity_position(punti1)
-        punti2 = node.ros_to_unity_position(punti2)
+        tasca = node.generate_wavy_trajectory_oblique()
+        zip = node.generate_pocket_square2()
 
         # Costruisci la lista piatta
-        flat = [len(punti1), len(punti2)] + punti1.flatten().tolist() + punti2.flatten().tolist()
+        flat = [len(tasca), len(zip)] + tasca.flatten().tolist() + zip.flatten().tolist()
 
         # Invia come array numpy
         success = node.send_waypoint(np.array(flat))
@@ -218,6 +147,6 @@ def main():
         print(f"Errore fatale nel main: {e}")
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+
 
     

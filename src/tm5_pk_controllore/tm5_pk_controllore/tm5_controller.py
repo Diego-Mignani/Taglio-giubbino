@@ -36,21 +36,49 @@ class RobotController(Node):
         self.robot_desc = self.get_parameter('robot_description').get_parameter_value().string_value
 
         # Parametri di design del controller
-        self.dt = 0.033 # 30Hz coerente con Unity
-        #self.Kp = np.diag([45, 35, 40, 1, 1, 1]) *50                      # np.diag([50, 50, 50, 20, 20, 20]) 
-        #self.Kd = np.diag([0.5, 0.8, 0.8, 0.05, 0.05, 0.05]) *10         # np.diag([10, 10, 10, 5, 5, 5])
+        self.dt = 0.1 # 30Hz coerente con Unity
+        #self.dt = 0.0333
     
-        self.Kp = np.diag([155, 150, 115, 120, 90, 90])
-        self.Kd = np.diag([105, 60, 110, 40, 66, 26])
+        #self.Kp = np.diag([135,100,135,110,85,1])
+        #self.Kd = np.diag([5,15,5,10,6,6])
 
-        self.traj_duration =0.0
+        #self.Kp = np.diag([105,100,105,100,85,1])
+        #self.Kd = np.diag([5,15,5,10,6,6])
+
+        self.declare_parameter('Kp')
+        self.declare_parameter('Kd')
+        self.declare_parameter('K_ori')
+        self.declare_parameter('w_ori')
+
+        # Placeholder iniziali (veri valori arrivano dal YAML) 
+        self.Kp = np.eye(6) 
+        self.Kd = np.eye(6) 
+        self.K_ori = 1.0 
+        self.w_ori = 1.0
+
+        self.param_timer = self.create_timer(0.1, self.load_params_once)
+
+
+
+
+        self.controller = JointSpaceController6DOF(
+            Kp=self.Kp,
+            Kd=self.Kd,
+            dt=self.dt,
+            robot_desc=self.robot_desc,
+            K_ori=self.K_ori,
+            w_ori=self.w_ori
+        )
+
+
+        self.traj_duration = 0.0
 
         # Variabili di stato del controller
         self.q_dot_cmd = np.zeros(6)
         self.q_cmd = np.zeros(6, dtype=float)
 
         # Inizializza il controller e la cinematica
-        self.controller = JointSpaceController6DOF(self.Kp, self.Kd, self.dt, self.robot_desc)
+        #self.controller = JointSpaceController6DOF(self.Kp, self.Kd, self.dt, self.robot_desc)
         self.kinematics = kinematics.KDLKinematics6DOF(self.robot_desc)
         self.num_joints = self.kinematics.num_joints
         
@@ -60,7 +88,8 @@ class RobotController(Node):
         self.traiettoria_pronta = False
 
         # Variabili per il feedback della posa end-effector da Unity
-        self.pos_reale_unity = np.zeros(3) 
+        self.posizione_reale_unity = np.zeros(3)
+        self.orientazione_reale_unity =  np.zeros(4)
         self.ee_pose_valid = False
 
         # Variabile per lo stato corrente dei giunti
@@ -70,6 +99,7 @@ class RobotController(Node):
 
         # Timer per il controllo
         self.timer = self.create_timer(self.dt, self.control_callback_sg1)
+        #self.timer = self.create_timer(self.dt, self.control_callback_so1)
 
         # Vari canali di comunicazione
         self.publisher = self.create_publisher(Float64MultiArray, 'joint_commands', 10)
@@ -79,7 +109,6 @@ class RobotController(Node):
         self.ready_pub = self.create_publisher(Bool, 'robot_ready', 10)
         self.unity_ready = False
         self.unity_ready_sub = self.create_subscription(Bool,'unity_ready',self.unity_ready_callback, 10)
-
         self.unity_connected = False
     
     def unity_ready_callback(self, msg):
@@ -88,13 +117,46 @@ class RobotController(Node):
             self.unity_ready = True
 
 
+    def load_params_once(self):
+        """Carica i parametri dal YAML dopo che ROS2 li ha applicati.""" 
+        Kp_list = self.get_parameter('Kp').value 
+        Kd_list = self.get_parameter('Kd').value 
+        K_ori_val = self.get_parameter('K_ori').value 
+        w_ori_val = self.get_parameter('w_ori').value 
+        
+        if Kp_list is None or Kd_list is None or K_ori_val is None or w_ori_val is None: 
+            self.get_logger().warn("Parametri non ancora disponibili, ritento...") 
+            return 
+        
+        self.Kp = np.diag(np.array(Kp_list, dtype=float)) 
+        self.Kd = np.diag(np.array(Kd_list, dtype=float)) 
+        self.K_ori = float(K_ori_val) 
+        self.w_ori = float(w_ori_val) 
+        
+        self.get_logger().info(f"Parametri caricati dal YAML:") 
+        self.get_logger().info(f"Kp = {self.Kp}") 
+        self.get_logger().info(f"Kd = {self.Kd}") 
+        self.get_logger().info(f"K_ori = {self.K_ori}") 
+        self.get_logger().info(f"w_ori = {self.w_ori}") 
+        
+        # Aggiorna il controller con i valori veri 
+        self.controller.Kp = self.Kp 
+        self.controller.Kd = self.Kd 
+        self.controller.K_ori = self.K_ori 
+        self.controller.w_ori = self.w_ori 
+        
+        # Disattiva il timer 
+        self.param_timer.cancel()
+
+
     def pose_ee_feedback_callback(self, msg):
         '''
         Callback per ricevere la posa reale dell'end-effector da Unity.
         Args:
             msg (Pose): Messaggio contenente la posa dell'end-effector
         '''
-        self.pos_reale_unity = np.array( [msg.position.x, msg.position.y, msg.position.z], dtype=float ) 
+        self.posizione_reale_unity = np.array( [msg.position.x, msg.position.y, msg.position.z], dtype=float )
+        self.orientazione_reale_unity = np.array([msg.orientation.x, msg.orientation.y, msg.orientation.z, msg.orientation.w])
         self.ee_pose_valid = True
 
     
@@ -151,10 +213,7 @@ class RobotController(Node):
         # logghi il dt reale per statistiche
         self.dt_log.append(raw_dt)
         self.last_js_time = self.get_clock().now().nanoseconds * 1e-9
-
-        # ma per il controllo usi un dt "stabile"
-        #dt_real = np.clip(raw_dt, 0.03, 0.05)  # tra 20 e 33 Hz, ad esempio
-        #self.control_callback_sg1(dt_real)
+    
 
 
     def receive_trajectory(self, msg):
@@ -178,7 +237,7 @@ class RobotController(Node):
         if hasattr(self, "prev_time"): 
             del self.prev_time 
         # Ipotizziamo che msg.data sia un array piatto di N punti * 10 valori
-        data = np.array(msg.data).reshape(-1, 10)
+        data = np.array(msg.data).reshape(-1, 14)
         self.full_traj = []
         
         for row in data:
@@ -187,7 +246,8 @@ class RobotController(Node):
                 X=row[1:4],      # Posizione
                 Xdot=row[4:7],   # Velocità
                 Xddot=row[7:10], # Accelerazione
-                t=row[0]
+                t=row[0],
+                Q = row[10:14] 
             )
             self.full_traj.append(point)
         
@@ -197,7 +257,7 @@ class RobotController(Node):
         self.traj_duration = (len(self.full_traj) - 1) * self.dt
 
 
-    def salva_dati(self, IAE, ISE, ITAE, RMSE, dt_mean, dt_max, dt_min):
+    def salva_dati(self, IAE, ISE, ITAE, RMSE, dt_mean, dt_max, dt_min, conteggio):
         save_dir = os.path.expanduser("~/ros2_ws/prestazioni")
         os.makedirs(save_dir, exist_ok=True)
         file_path = os.path.join(save_dir, "prestazioni_robot.csv")
@@ -223,77 +283,9 @@ class RobotController(Node):
                 len(self.full_traj),
                 dt_mean,
                 dt_max,
-                dt_min
+                dt_min,
+                conteggio
             ])
-
-
-
-    #------------------------------------------------------------------------------
-    #   CONTROLLO SULLO SPAZIO OPERATIVO E LA POSIZIONE REALE DELL'EE COME FEEDBACK
-    #-------------------------------------------------------------------------------
-    
-    def control_callback_so2(self):
-        """
-        Callback del timer per il controllo del robot.
-        Esegue il controllo in velocità giunti basato sulla posa end-effector reale.
-        """
-
-        # Condizioni di sicurezza
-        if (not self.unity_connected or
-            not self.traiettoria_pronta or
-            not self.state_initialized or
-            not self.ee_pose_valid):
-            return
-
-        # Se la traiettoria è finita, non fare nulla
-        if self.traj_index >= len(self.full_traj):
-
-            IAE, ISE, ITAE, RMSE = self.controller.compute_performance_indices(self.dt)
-
-            self.get_logger().info("=== INDICI DI PRESTAZIONE ===")
-            self.get_logger().info(f"IAE  = {IAE:.6f}")
-            self.get_logger().info(f"ISE  = {ISE:.6f}")
-            self.get_logger().info(f"ITAE = {ITAE:.6f}")
-            self.get_logger().info(f"RMSE = {RMSE:.6f}")
-            self.get_logger().info("==============================")
-
-            return
-
-        traj_point = self.full_traj[self.traj_index]
-
-        # Comando in velocità giunti da compute_command_so2 (usa giunti + posa cartesiana reale)
-        qdot_cmd = self.controller.compute_command_so2(
-            self.current_js,
-            self.pos_reale_unity,
-            traj_point
-        )
-        qdot_cmd = np.array(qdot_cmd, dtype=float)
-
-        # Saturazione velocità (per sicurezza)
-        max_qdot = 1.5  # rad/s
-        qdot_cmd = np.clip(qdot_cmd, -max_qdot, max_qdot)
-
-        # Integrazione per ottenere la posizione da mandare a Unity
-        self.q_cmd = self.q_cmd + qdot_cmd * self.dt
-
-        # Controllo di sanità su q_cmd
-        if np.any(~np.isfinite(self.q_cmd)):
-            self.get_logger().error("q_cmd contiene NaN o Inf! Blocco il controllo.")
-            return
-
-        # Saturazione posizioni su limiti giunti
-        q_min = np.deg2rad([-180, -120, -120, -180, -120, -360])
-        q_max = np.deg2rad([ 180,  120,  120,  180,  120,  360])
-        #self.q_cmd = np.clip(self.q_cmd, q_min, q_max)
-
-        # Pubblica verso Unity
-        msg = Float64MultiArray()
-        msg.data = self.q_cmd.tolist()
-        self.publisher.publish(msg)
-
-        # Avanza nella traiettoria
-        self.traj_index += 1
-
     
     #-----------------------------------------------------------------
     #   CONTROLLO SPAZIO DEI GIUNTI DI ALESSANDRO
@@ -315,10 +307,11 @@ class RobotController(Node):
             self.get_logger().info("[DEBUG] Entrato nel blocco fine traiettoria")
             self.traj_finita = True # <-- evita ripetizioni
             # Statistiche dt_real
-
-            dt_mean = self.dt
-            dt_max = self.dt
-            dt_min = self.dt
+            dt_array = np.array(self.dt_log, dtype=float)
+            dt_mean = np.mean(self.dt_log)
+            dt_max = np.max(self.dt_log)
+            dt_min = np.min(self.dt_log)
+            conteggio = np.sum(dt_array > 0.12) 
 
             IAE, ISE, ITAE, RMSE = self.controller.compute_performance_indices(dt_mean)
 
@@ -331,7 +324,7 @@ class RobotController(Node):
 
             
 
-            self.salva_dati(IAE, ISE, ITAE, RMSE, dt_mean, dt_max, dt_min)
+            self.salva_dati(IAE, ISE, ITAE, RMSE, dt_mean, dt_max, dt_min,conteggio)
             self.get_logger().info(f"dt_real — media: {dt_mean:.6f}, max: {dt_max:.6f}, min: {dt_min:.6f}")
 
             return
@@ -342,11 +335,13 @@ class RobotController(Node):
             self.get_logger().info("In attesa di feedback da Unity...", throttle_duration_sec=2.0)
             return
 
-        Xd, Xd_dot, Xd_ddot = self.evaluate()
+
+
+        Xd, Xd_dot, Xd_ddot, Qd = self.evaluate()
 
         u, qd, qd_dot, qd_ddot = self.controller.compute_command(
             self.current_js,
-            Xd, Xd_dot, Xd_ddot
+            Xd, Xd_dot, Xd_ddot, Qd
         )
 
         # === 3. Stato attuale ===
@@ -357,9 +352,6 @@ class RobotController(Node):
         qdot_new = qdot + u * self.dt
         q_new = q + qdot_new * self.dt
 
-
-
-
         # === 5. Pubblica verso Unity ===
         msg = Float64MultiArray()
         msg.data = q_new.tolist()
@@ -367,100 +359,90 @@ class RobotController(Node):
         self.t_traj += self.dt
         self.traj_index += 1
 
-
-
     def evaluate(self):
         i = int(self.t_traj/self.dt)
         if i >= len(self.full_traj):
             i = len(self.full_traj) - 1
 
         traj_point = self.full_traj[i]
-        return traj_point.X, traj_point.Xdot, traj_point.Xddot
+        return traj_point.X, traj_point.Xdot, traj_point.Xddot, traj_point.Q
 
-    
-    
     #-----------------------------------------------------------------
-    #   CONTROLLO SULLO SPAZIO DEI GIUNTI SIMULATO
+    #   CONTROLLO SPAZIO OPERATIVO (CARTESIANO) CON FEEDBACK GIUNTI
     #-----------------------------------------------------------------
-    def control_callback_sg_sim(self):
-        if not self.unity_connected or not self.state_initialized:
+    def control_callback_so1(self):
+
+        # === 1. Condizioni di sicurezza ===
+        if not self.unity_ready:
+            return
+
+        if self.traj_finita:
+            return
+
+        if not self.traiettoria_pronta:
+            return
+
+        if not self.unity_connected or self.current_js is None:
             self.get_logger().info("In attesa di feedback da Unity...", throttle_duration_sec=2.0)
             return
 
-        if not self.traiettoria_pronta or self.traj_index >= len(self.full_traj):
+        # === 2. Fine traiettoria ===
+        if self.traj_index >= len(self.full_traj) and not self.traj_finita:
+
+            self.get_logger().info("[DEBUG] Fine traiettoria raggiunta (SO).")
+            self.traj_finita = True
+
+            # Statistiche dt (qui usi dt fisso)
+            dt_mean = self.dt
+            dt_max = self.dt
+            dt_min = self.dt
+
+            # Indici di performance
+            IAE, ISE, ITAE, RMSE = self.controller.compute_performance_indices(dt_mean)
+
+            self.get_logger().info("=== INDICI DI PRESTAZIONE (SO) ===")
+            self.get_logger().info(f"IAE  = {IAE:.6f}")
+            self.get_logger().info(f"ISE  = {ISE:.6f}")
+            self.get_logger().info(f"ITAE = {ITAE:.6f}")
+            self.get_logger().info(f"RMSE = {RMSE:.6f}")
+            self.get_logger().info("==================================")
+
+            self.salva_dati(IAE, ISE, ITAE, RMSE, dt_mean, dt_max, dt_min)
             return
 
-        now = self.get_clock().now().nanoseconds * 1e-9
-        if not hasattr(self, "last_js_time") or now - self.last_js_time > 0.05:
-            self.get_logger().warn("JointState non aggiornato. Salto questo ciclo.")
-            return
-
+        # === 3. Punto di traiettoria corrente ===
         traj_point = self.full_traj[self.traj_index]
 
-        # Costruisci un JointState fittizio per il controller
-        js_for_ctrl = JointState()
-        js_for_ctrl.position = self.q_sim.tolist()
-        js_for_ctrl.velocity = self.qdot_sim.tolist()
-
-        u, qd, qd_dot, qd_ddot = self.controller.compute_command(js_for_ctrl, traj_point)
-
-        #q_cmd, qd, qd_dot = self.controller.compute_command2(self.current_js, traj_point)
-
-        # Dinamica semplificata (il tuo "servo")
-        qddot = u
-        self.qdot_sim = self.qdot_sim + qddot * self.dt
-        self.q_sim = self.q_sim + self.qdot_sim * self.dt
-
-        # (opzionale) saturazioni su velocità / posizione
-        # self.qdot_sim = np.clip(self.qdot_sim, -max_vel, max_vel)
-        # self.q_sim = np.clip(self.q_sim, q_min, q_max)
-
-        msg = Float64MultiArray() 
-        msg.data = self.q_sim.tolist() 
-        self.publisher.publish(msg)
-
-        self.traj_index += 1
-
-    #-----------------------------------------------------------------
-    #   CONTROLLO SULLO SPAZIO OPERATIVO E I GIUNTI COME FEEDBACK
-    #-----------------------------------------------------------------
-    def control_callback_so1(self):
-        # 1) Condizioni di sicurezza
-        if not self.unity_connected or not self.traiettoria_pronta or not self.state_initialized:
-            return
-
-        if self.traj_index >= len(self.full_traj):
-            return
-
-        traj_point = self.full_traj[self.traj_index]
-
-        # 2) Comando in velocità giunti da compute_command (deve restituire SOLO qdot_cmd)
+        # === 4. Comando cartesiano → velocità giunti ===
         qdot_cmd = self.controller.compute_command_so(self.current_js, traj_point)
         qdot_cmd = np.array(qdot_cmd, dtype=float)
-        # Saturazione velocità (per sicurezza)
-        max_qdot = 1.5  # rad/s
+
+        # Saturazione di sicurezza
+        max_qdot = 1.5
         qdot_cmd = np.clip(qdot_cmd, -max_qdot, max_qdot)
 
-        # 3) Integrazione per ottenere la posizione da mandare a Unity
+        # === 5. Integrazione per ottenere q_cmd ===
         self.q_cmd = self.q_cmd + qdot_cmd * self.dt
 
-        # 4) Controllo di sanità
+        # === 6. Controllo sanità ===
         if np.any(~np.isfinite(self.q_cmd)):
             self.get_logger().error("q_cmd contiene NaN o Inf! Blocco il controllo.")
             return
 
+        # Limiti giunti
         q_min = np.deg2rad([-180, -120, -120, -180, -120, -360])
         q_max = np.deg2rad([ 180,  120,  120,  180,  120,  360])
-
         self.q_cmd = np.clip(self.q_cmd, q_min, q_max)
 
-        # 5) Pubblica verso Unity
+        # === 7. Pubblica verso Unity ===
         msg = Float64MultiArray()
         msg.data = self.q_cmd.tolist()
         self.publisher.publish(msg)
 
-        # 6) Avanza nella traiettoria
+        # === 8. Avanza nella traiettoria ===
+        self.t_traj += self.dt
         self.traj_index += 1
+
 
 
 def main():

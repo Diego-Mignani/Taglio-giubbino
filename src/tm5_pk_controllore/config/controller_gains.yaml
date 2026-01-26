@@ -1,0 +1,9 @@
+tm5_robot_controller:
+  ros__parameters:
+    # Guadagni posizione/orientazione in spazio dei giunti
+    Kp: [80.0, 80.0, 80.0, 100.0, 100.0, 100.0]
+    Kd: [5.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+
+    # Guadagni orientazione nello spazio operativo
+    K_ori: 1.0
+    w_ori: 1.0
