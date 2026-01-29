@@ -36,7 +36,7 @@ class RobotController(Node):
         self.robot_desc = self.get_parameter('robot_description').get_parameter_value().string_value
 
         # Parametri di design del controller
-        self.dt = 0.1 # 30Hz coerente con Unity
+        self.dt = 0.033 # 30Hz coerente con Unity
         #self.dt = 0.0333
     
         #self.Kp = np.diag([135,100,135,110,85,1])
@@ -57,9 +57,6 @@ class RobotController(Node):
         self.w_ori = 1.0
 
         self.param_timer = self.create_timer(0.1, self.load_params_once)
-
-
-
 
         self.controller = JointSpaceController6DOF(
             Kp=self.Kp,
@@ -270,7 +267,7 @@ class RobotController(Node):
         with open(file_path, mode="a", newline="") as f:
             writer = csv.writer(f, delimiter=';')  # separatore di colonna corretto
             if write_header:
-                writer.writerow(["timestamp", "IAE", "ISE", "ITAE", "RMSE", "Kp", "Kd", "traj_len","dt_mean","dt_max","dt_min"])
+                writer.writerow(["timestamp", "IAE", "ISE", "ITAE", "RMSE", "Kp", "Kd","K_ori","w_ori", "traj_len","dt_mean","dt_max","dt_min"])
 
             writer.writerow([
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -280,6 +277,8 @@ class RobotController(Node):
                 f"{RMSE:.6f}".replace('.', ','),
                 Kp_str,
                 Kd_str,
+                self.K_ori,
+                self.w_ori,
                 len(self.full_traj),
                 dt_mean,
                 dt_max,

@@ -13,7 +13,7 @@ class TrajectoryManager(Node):
     def __init__(self):
         super().__init__('tm5_gestione_traiettoria')
         
-        self.dt = 0.033
+        self.dt = 0.1
         self.received_waypoint = None
         self.trajectory_ready = False
 
@@ -85,28 +85,32 @@ class TrajectoryManager(Node):
         # APPROACH (home → primo punto)
         # -------------------------------
         approach_traj1 = self.linear_cartesian_segment(
-            self.X_home, X_first1, self.dt, duration=1.5 , Q=self.Q_home
+            self.X_home, X_first1, self.dt, duration=1.5,
+            Q_start=self.Q_home, Q_end=self.Q_down
         )
 
         # -------------------------------
         # RETREAT (ultimo punto → home)
         # -------------------------------
         retreat_traj1 = self.linear_cartesian_segment(
-            X_last1, self.X_home, self.dt, duration=1.5 , Q=self.Q_down
+            X_last1, self.X_home, self.dt, duration=1.5, 
+            Q_start=self.Q_down, Q_end=self.Q_down
         )
         
         # -------------------------------
         # APPROACH (home → primo punto)
         # -------------------------------
         approach_traj2 = self.linear_cartesian_segment(
-            self.X_home, X_first2, self.dt, duration=1.5 , Q=self.Q_down
+            self.X_home, X_first2, self.dt, duration=1.5, 
+            Q_start=self.Q_down, Q_end=self.Q_down
         )
 
         # -------------------------------
         # RETREAT (ultimo punto → home)
         # -------------------------------
         retreat_traj2 = self.linear_cartesian_segment(
-            X_last2, self.X_home, self.dt, duration=1.5 , Q=self.Q_home
+            X_last2, self.X_home, self.dt, duration=1.5 , 
+            Q_start=self.Q_down, Q_end=self.Q_home
         )
 
         # traiettoria totale: approach + tracking + retreat
@@ -181,20 +185,29 @@ class TrajectoryManager(Node):
     #  FUNZIONI INTERNE
     # ----------------------------------------------------------
 
-    def linear_cartesian_segment(self, X_start, X_end, dt, duration, Q=None):
-        t = np.arange(0, duration, dt)
-        Xd = X_start + np.outer(t / duration, (X_end - X_start))
-        Xd_dot = np.tile((X_end - X_start) / duration, (len(t), 1))
-        Xd_ddot = np.zeros_like(Xd)
+    def linear_cartesian_segment(self, X_start, X_end, dt, duration, Q_start, Q_end):
+        # 1) lunghezza del segmento
+        L = np.linalg.norm(X_end - X_start)
 
+        # 2) profilo trapezoidale in s(t)
+        vmax = L / (duration / 2)   # stima semplice
+        amax = vmax / 0.5           # accelera in metà tempo
+        t, s_t, v_t, a_t = self._trapezoidal_time_scaling(L, vmax, amax)
+
+        # 3) interpolazione lineare in posizione usando s(t)
+        direction = (X_end - X_start) / L
+        Xd = X_start + np.outer(s_t, direction)
+        Xd_dot = np.outer(v_t, direction)
+        Xd_ddot = np.outer(a_t, direction)
+
+        # 4) interpolazione SLERP dell’orientazione
         traj = []
-
         for i in range(len(t)):
-            traj.append(CartesianTrajectoryPoint(t[i], Xd[i], Xd_dot[i], Xd_ddot[i], Q = Q))
+            alpha = s_t[i] / L
+            Q_interp = self.slerp(Q_start, Q_end, alpha)
+            traj.append(CartesianTrajectoryPoint(t[i], Xd[i], Xd_dot[i], Xd_ddot[i], Q=Q_interp))
 
         return traj
-
-
 
     def _compute_s(self, points):
         """

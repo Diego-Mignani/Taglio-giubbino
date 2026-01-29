@@ -26,8 +26,6 @@ def compute_angular_velocity(Q_prev, Q_curr, dt):
     return rotvec / dt
 
 
-
-
 class JointSpaceController6DOF:
     def __init__(self, Kp: np.ndarray, Kd: np.ndarray, dt: float, robot_desc: str, K_ori=1.0, w_ori=1.0):
         """
@@ -61,12 +59,9 @@ class JointSpaceController6DOF:
         R_act = self.kinematics.rotation_from_T(T)
         q_actual = self.kinematics.quaternion_from_R(R_act)
 
-        
-
         rpy_des = R.from_quat(Qd).as_euler('xyz', degrees=True)
         rpy_act = R.from_quat(q_actual).as_euler('xyz', degrees=True)
         print(f"RPY_des={rpy_des}, RPY_act={rpy_act}")
-
 
         # === Errori cartesiani ===
         e_pos = Xd - X_actual
