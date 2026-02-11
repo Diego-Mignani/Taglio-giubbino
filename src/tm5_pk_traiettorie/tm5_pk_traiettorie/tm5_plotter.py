@@ -4,50 +4,54 @@ from rclpy.node import Node
 import numpy as np
 import matplotlib.pyplot as plt
 from std_msgs.msg import Float64MultiArray
-from geometry_msgs.msg import Pose
+from sensor_msgs.msg import JointState
+import os
+from my_robot_utils import kinematics
+from ament_index_python.packages import get_package_share_directory
 
 
 class TrajectoryPlotter(Node):
     def __init__(self):
         super().__init__('trajectory_plotter')
 
-        # buffer dati
-        self.desired = None
-        self.actual = []
+        # URDF dal package
+        description_package = get_package_share_directory('tm_description')
+        urdf_file = os.path.join(description_package, 'urdf', 'tm5-900.urdf')
+        with open(urdf_file, 'r') as infp:
+            robot_desc = infp.read()
+        self.kin = kinematics.KDLKinematics6DOF(robot_desc)
 
-        # tempi di campionamento (IMPOSTALI TU)
-        self.dt_des = 0.1   # dt generatore traiettoria
-        self.dt_act = 0.1     # dt Unity / controller
+        # buffer dati desiderati
+        self.des_pos = None
+        self.des_vel = None
+        self.des_acc = None
+        self.des_quat = None
+        self.t_des = None
+
+        # buffer giunti
+        self.q_list = []
+        self.qdot_list = []
+
+        # dt Unity
+        self.dt_act = 0.033
 
         # subscriber
-        self.create_subscription(
-            Float64MultiArray,
-            'trajectory',
-            self.desired_callback,
-            10
-        )
-
-        self.create_subscription(
-            Pose,
-            'unity_end_effector_pose',
-            self.pose_ee_feedback_callback,
-            10
-        )
+        self.create_subscription(Float64MultiArray, 'trajectory', self.desired_callback, 10)
+        self.create_subscription(JointState, 'unity_joint_feedback', self.joint_callback, 10)
 
     # -------------------------
     # CALLBACKS
     # -------------------------
 
-    def pose_ee_feedback_callback(self, msg):
-        self.actual.append([
-            msg.position.x,
-            msg.position.y,
-            msg.position.z,
-            msg.orientation.x,
-            msg.orientation.y,
-            msg.orientation.z,
-            msg.orientation.w
-        ])
+    def joint_callback(self, msg: JointState):
+        if len(msg.position) == 6:
+            self.q_list.append(np.array(msg.position))
+
+        if len(msg.velocity) == 6:
+            self.qdot_list.append(np.array(msg.velocity))
+        else:
+            # se Unity non manda velocity, metti zero
+            self.qdot_list.append(np.zeros(6))
 
     def desired_callback(self, msg):
         data = np.array(msg.data)
@@ -55,59 +59,68 @@ class TrajectoryPlotter(Node):
         reshaped = data.reshape(N, 14)
 
         self.t_des = reshaped[:, 0]
-        self.desired = reshaped[:, 1:4]
+        self.des_pos = reshaped[:, 1:4]
         self.des_vel = reshaped[:, 4:7]
         self.des_acc = reshaped[:, 7:10]
         self.des_quat = reshaped[:, 10:14]
 
-
         self.get_logger().info(f"Ricevuti {N} punti desiderati")
-
 
     # -------------------------
     # PLOTTING
     # -------------------------
 
     def plot(self):
-        if self.desired is None or len(self.actual) == 0:
+        if self.des_pos is None or len(self.q_list) == 0:
             print("Dati insufficienti per il plot")
             return
 
-        actual = np.array(self.actual)
-        t_des = self.t_des
+        # allinea q e qdot
+        N = min(len(self.q_list), len(self.qdot_list))
+        q_arr = np.array(self.q_list[:N])
+        qdot_arr = np.array(self.qdot_list[:N])
 
-        # asse temporale corretto
-        t_act = np.arange(len(actual)) * self.dt_act
+        # tempo attuale grezzo
+        t_act = np.arange(N) * self.dt_act
+        t_des = self.t_des.copy()
 
-        # --- rimuovi timestamp duplicati PRIMA di tutto ---
-        mask = np.diff(t_des) > 1e-6
-        mask = np.insert(mask, 0, True)  # mantieni il primo punto
+        # allineamento temporale: taglia l'attuale prima dell'inizio del desiderato
+        t0_des = t_des[0]
+        mask_act = t_act >= t0_des
+        t_act = t_act[mask_act] - t0_des
+        q_arr = q_arr[mask_act]
+        qdot_arr = qdot_arr[mask_act]
 
-        t_des = t_des[mask]
-        self.desired = self.desired[mask]
-        self.des_vel = self.des_vel[mask]
-        self.des_acc = self.des_acc[mask]
-        self.des_quat = self.des_quat[mask]
+        # shift anche il desiderato
+        t_des = t_des - t0_des
 
-        # estrai quaternioni (già filtrati)
-        q_des = self.des_quat
-        q_act = actual[:, 3:7]
+        # ricostruzione posizione e velocità cartesiana
+        X_act = []
+        Xdot_act = []
 
-        # converti in RPY
-        rpy_des = R.from_quat(q_des).as_euler('xyz', degrees=True)
-        rpy_act = R.from_quat(q_act).as_euler('xyz', degrees=True)
+        for q, qdot in zip(q_arr, qdot_arr):
+            T = self.kin.fk_6dof(q)
+            pos = self.kin.position_from_T(T)
 
-        # velocità / accelerazione / jerk desiderati
-        v_des = self.des_vel[:, 0]
-        a_des = self.des_acc[:, 0]
+            J = self.kin.get_full_jacobian(q)
+            J_pos = J[:3, :]
 
-        j_des = np.zeros_like(a_des)
-        for i in range(1, len(a_des)):
-            dt = t_des[i] - t_des[i-1]
-            if dt > 1e-6:
-                j_des[i] = (a_des[i] - a_des[i-1]) / dt
-            else:
-                j_des[i] = j_des[i-1]
+            vel = J_pos @ qdot
+
+            X_act.append(pos)
+            Xdot_act.append(vel)
+
+        X_act = np.array(X_act)
+        Xdot_act = np.array(Xdot_act)
+        if Xdot_act.ndim == 1:
+            Xdot_act = Xdot_act.reshape(1, -1)
+
+        # accelerazione e jerk attuali
+        acc_act = np.gradient(Xdot_act[:, 0], self.dt_act)
+        jerk_act = np.gradient(acc_act, self.dt_act)
+
+        # jerk desiderato
+        jerk_des = np.gradient(self.des_acc[:, 0], t_des)
 
         # -------------------------
         # POSIZIONE / VELOCITÀ / ACC / JERK
@@ -115,68 +128,28 @@ class TrajectoryPlotter(Node):
 
         plt.figure(figsize=(12, 10))
 
-        # Posizione
         plt.subplot(4, 1, 1)
-        plt.plot(t_des, self.desired[:, 0], label='X_des')
-        plt.plot(t_act, actual[:, 0], label='X_act')
-        plt.legend()
-        plt.title("Posizione")
+        plt.plot(t_des, self.des_pos[:, 0], label='X_des')
+        plt.plot(t_act, X_act[:, 0], label='X_act')
+        plt.legend(); plt.title("Posizione")
 
-        # Velocità
         plt.subplot(4, 1, 2)
-        v_act = np.gradient(actual[:, 0], self.dt_act)
-        plt.plot(t_des, v_des, label='Vx_des')
-        plt.plot(t_act, v_act, label='Vx_act')
-        plt.legend()
-        plt.title("Velocità")
+        plt.plot(t_des, self.des_vel[:, 0], label='Vx_des')
+        plt.plot(t_act, Xdot_act[:, 0], label='Vx_act')
+        plt.legend(); plt.title("Velocità")
 
-        # Accelerazione
         plt.subplot(4, 1, 3)
-        a_act = np.gradient(v_act, self.dt_act)
-        plt.plot(t_des, a_des, label='Ax_des')
-        plt.plot(t_act, a_act, label='Ax_act')
-        plt.legend()
-        plt.title("Accelerazione")
+        plt.plot(t_des, self.des_acc[:, 0], label='Ax_des')
+        plt.plot(t_act, acc_act, label='Ax_act')
+        plt.legend(); plt.title("Accelerazione")
 
-        # Jerk
         plt.subplot(4, 1, 4)
-        j_act = np.gradient(a_act, self.dt_act)
-        plt.plot(t_des, j_des, label='Jx_des')
-        plt.plot(t_act, j_act, label='Jx_act')
-        plt.legend()
-        plt.title("Jerk")
+        plt.plot(t_des, jerk_des, label='Jx_des')
+        plt.plot(t_act, jerk_act, label='Jx_act')
+        plt.legend(); plt.title("Jerk")
 
         plt.tight_layout()
-        plt.show(block=False)
-        plt.pause(0.1)
-
-        # -------------------------
-        # ORIENTAZIONE
-        # -------------------------
-
-        plt.figure(figsize=(12, 10))
-
-        plt.subplot(3, 1, 1)
-        plt.plot(t_des, rpy_des[:, 0], label='roll_des')
-        plt.plot(t_act, rpy_act[:, 0], label='roll_act')
-        plt.legend()
-        plt.title("Orientazione X - Roll")
-
-        plt.subplot(3, 1, 2)
-        plt.plot(t_des, rpy_des[:, 1], label='pitch_des')
-        plt.plot(t_act, rpy_act[:, 1], label='pitch_act')
-        plt.legend()
-        plt.title("Orientazione Y - Pitch")
-
-        plt.subplot(3, 1, 3)
-        plt.plot(t_des, rpy_des[:, 2], label='yaw_des')
-        plt.plot(t_act, rpy_act[:, 2], label='yaw_act')
-        plt.legend()
-        plt.title("Orientazione Z - Yaw")
-
-        plt.tight_layout()
-        plt.show(block=False)
-        plt.pause(0.1)
+        plt.show()
 
 
 def main():
@@ -191,11 +164,5 @@ def main():
     print("Plotting…")
     node.plot()
 
-    # mantieni aperte le finestre
-    try:
-        while True:
-            plt.pause(0.1)
-    except KeyboardInterrupt:
-        pass
-
     node.destroy_node()
+    rclpy.shutdown()

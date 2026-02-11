@@ -15,6 +15,8 @@ import threading
 import time
 from scipy.spatial.transform import Rotation as R
 from rclpy.clock import Clock, ClockType
+import numpy as np 
+import matplotlib.pyplot as plt
 
 
 
@@ -117,6 +119,10 @@ class RobotController(Node):
         self.control_thread.start()
         self.control_thread_started = True
         self.get_logger().info("Thread di controllo avviato.")
+        self.log_data = []   # lista di dizionari
+        self.prev_q = None
+        self.prev_t = None
+
 
     # ------------------------------------------------------------------
     # CALLBACK E PARAMETRI
@@ -309,9 +315,11 @@ class RobotController(Node):
             self.get_logger().info("==============================")
 
             self.salva_dati(IAE, ISE, ITAE, RMSE, dt_mean, dt_max, dt_min, conteggio)
+            self.salva_log_traiettoria()
             self.get_logger().info(
                 f"dt_real — media: {dt_mean:.6f}, max: {dt_max:.6f}, min: {dt_min:.6f}"
             )
+            self.plotta_traiettoria()
             return
 
 
@@ -322,8 +330,25 @@ class RobotController(Node):
         # 1. Traiettoria desiderata
         Xd, Xd_dot, Xd_ddot, Qd = self.evaluate()
 
+
+        now = self.steady_clock.now().nanoseconds * 1e-9
+        q = np.array(self.current_js.position)
+
+        if self.prev_q is None:
+            q_dot_real = np.zeros(6)
+        else:
+            dt = now - self.prev_t
+            q_dot_real = (q - self.prev_q) / max(dt, 1e-6)
+
+        self.prev_q = q.copy()
+        self.prev_t = now
+
+        # Sovrascrivi la velocity del JointState
+        self.current_js.velocity = q_dot_real.tolist()
+
+
         # 2. Comando dal controller
-        u, qd, qd_dot, qd_ddot = self.controller.compute_command(
+        qdot_cmd, X, Xdot_real, Q_act, omega_real = self.controller.compute_command_operational(
             self.current_js,
             Xd, Xd_dot, Xd_ddot, Qd
         )
@@ -336,13 +361,24 @@ class RobotController(Node):
         dt = float(self.dt_real) if hasattr(self, "dt_real") else self.dt
         dt = max(0.0005, min(dt, 0.2))  # clamp di sicurezza
 
-        qdot_new = qdot + u * dt
-        q_new = q + qdot_new * dt
+        q_new = q + qdot_cmd * dt
 
         # 5. Pubblica verso Unity
         msg = Float64MultiArray()
         msg.data = q_new.tolist()
         self.publisher.publish(msg)
+
+        self.log_data.append({
+            "t": t_real,
+            "Xd": Xd.copy(),
+            "Xd_dot": Xd_dot.copy(),
+            "Xd_ddot": Xd_ddot.copy(),
+            "X": X.copy(),
+            "Xdot": Xdot_real.copy(),
+            "Q": Q_act.copy(),
+            "omega": omega_real.copy(),
+        })
+            
 
     def evaluate(self):
         """
@@ -391,6 +427,37 @@ class RobotController(Node):
         return Xd, Xd_dot, Xd_ddot, Qd
 
 
+    def salva_log_traiettoria(self):
+        save_dir = os.path.expanduser("~/ros2_ws/log_traj")
+        os.makedirs(save_dir, exist_ok=True)
+        file_path = os.path.join(save_dir, "traj_log.csv")
+
+        import csv
+        with open(file_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "t",
+                "Xd_x","Xd_y","Xd_z",
+                "Xd_dot_x","Xd_dot_y","Xd_dot_z",
+                "Xd_ddot_x","Xd_ddot_y","Xd_ddot_z",
+                "X_x","X_y","X_z",
+                "Xdot_x","Xdot_y","Xdot_z",
+                "Q_x","Q_y","Q_z","Q_w",
+                "omega_x","omega_y","omega_z"
+            ])
+
+            for row in self.log_data:
+                writer.writerow([
+                    row["t"],
+                    *row["Xd"],
+                    *row["Xd_dot"],
+                    *row["Xd_ddot"],
+                    *row["X"],
+                    *row["Xdot"],
+                    *row["Q"],
+                    *row["omega"]
+                ])
+
 
     # ------------------------------------------------------------------
     # SALVATAGGIO PRESTAZIONI
@@ -430,6 +497,46 @@ class RobotController(Node):
                 dt_min,
                 conteggio
             ])
+
+    def plotta_traiettoria(self):
+        file_path = os.path.expanduser("~/ros2_ws/log_traj/traj_log.csv") 
+        data = np.genfromtxt(file_path, delimiter=",", skip_header=1)
+
+        t = data[:,0]
+        Xd = data[:,1:4]
+        Xd_dot = data[:,4:7]
+        Xd_ddot = data[:,7:10]
+        X = data[:,10:13]
+        Xdot = data[:,13:16]
+
+        acc_act = np.gradient(Xdot[:,0], t)
+        jerk_act = np.gradient(acc_act, t)
+        jerk_des = np.gradient(Xd_ddot[:,0], t)
+
+        plt.figure(figsize=(12,10))
+
+        plt.subplot(4,1,1)
+        plt.plot(t, Xd[:,0], label="X_des")
+        plt.plot(t, X[:,0], label="X_act")
+        plt.legend(); plt.title("Posizione")
+
+        plt.subplot(4,1,2)
+        plt.plot(t, Xd_dot[:,0], label="Vx_des")
+        plt.plot(t, Xdot[:,0], label="Vx_act")
+        plt.legend(); plt.title("Velocità")
+
+        plt.subplot(4,1,3)
+        plt.plot(t, Xd_ddot[:,0], label="Ax_des")
+        plt.plot(t, acc_act, label="Ax_act")
+        plt.legend(); plt.title("Accelerazione")
+
+        plt.subplot(4,1,4)
+        plt.plot(t, jerk_des, label="Jx_des")
+        plt.plot(t, jerk_act, label="Jx_act")
+        plt.legend(); plt.title("Jerk")
+
+        plt.tight_layout()
+        plt.show()
 
 
 def main():

@@ -219,56 +219,61 @@ class JointSpaceController6DOF:
         return qdot_cmd
 
 
-    #---------------------------------------------------------
-    #    CONTROLLO ALESSANDRO SPAZIO OPERATIVO FEEDBACK POSA EE
-    #--------------------------------------------------------
-    def compute_command_so2(self,
-                        js: JointState,
-                        X_real: np.ndarray,
-                        traj_point: CartesianTrajectoryPoint):
+    def compute_command_operational(self, js, Xd, Xd_dot, Xd_ddot, Qd):
         """
-        Controllo in spazio operativo con feedback cartesiano reale.
-
-        js      : JointState reale (per q e qdot e Jacobiano)
-        X_real  : posizione cartesiana reale dell'EE (Unity)
-        traj_point: Xd, Xd_dot della traiettoria
+        Controllo in spazio operativo (posizione + velocità + accelerazione)
+        con Jacobiano smorzato e comando in velocità dei giunti.
+        Compatibile con Unity (nessun modello dinamico richiesto).
         """
 
-        # Stato reale nei giunti
+        # --- Stato reale ---
         q = np.array(js.position)
         q_dot = np.array(js.velocity) if len(js.velocity) == 6 else np.zeros(6)
 
-        # Posizione cartesiana reale: la prendi da Unity, NON rifai FK
-        X = np.array(X_real, dtype=float)
+        # --- Cinematica diretta ---
+        T = self.kinematics.fk_6dof(q)
+        X = self.kinematics.position_from_T(T)
+        R_act = self.kinematics.rotation_from_T(T)
+        Q_act = self.kinematics.quaternion_from_R(R_act)
 
-        # Jacobiano nel punto attuale (dai giunti)
+        # --- Jacobiano ---
         J = self.kinematics.get_full_jacobian(q)
-        J_pos = J[:3, :]
+        J_pos = J[:3, :]      # parte lineare
+        J_ori = J[3:6, :]     # parte angolare
 
-        # Traiettoria desiderata
-        Xd = traj_point.X
-        Xd_dot = traj_point.Xdot
+        # --- Errori cartesiani ---
+        e_pos = Xd - X
+        e_ori = self.kinematics.quat_error(Qd, Q_act)
 
-        # Errori cartesiani
-        e_x = Xd - X
+        # --- Velocità cartesiana reale ---
         Xdot_real = J_pos @ q_dot
-        e_xdot = Xd_dot - Xdot_real
+        omega_real = J_ori @ q_dot
+
+        e_vel = Xd_dot - Xdot_real
+        e_omega = omega_d = Xd_ddot*0  # placeholder se vuoi aggiungere orientazione dinamica
+
+        # --- Controllo cartesiano (PD + feedforward) ---
+        Kp = self.Kp[:3, :3]
+        Kd = self.Kd[:3, :3]
+
+        Xddot_cmd = Xd_ddot + Kp @ e_pos + Kd @ e_vel
+
+        # --- Converti accelerazione cartesiana in velocità giunti ---
+        # Jacobiano smorzato (damped least squares)
+        lambda2 = 1e-4
+        J_pos_pinv = J_pos.T @ np.linalg.inv(J_pos @ J_pos.T + lambda2 * np.eye(3))
+
+        qdot_cmd = q_dot + J_pos_pinv @ (Xddot_cmd * self.dt)
+
+        # --- Filtro e saturazione ---
+        max_qdot = 2.0
+        qdot_cmd = np.clip(qdot_cmd, -max_qdot, max_qdot)
+
         
-    
-        error_norm = np.linalg.norm(e_x)
-        self.error_history.append(error_norm)
-        
-        # Controllo cartesiano (uso solo i 3x3 di testa di Kp/Kd)
-        Kp_pos = self.Kp[:3, :3]
-        Kd_pos = self.Kd[:3, :3]
+        self.error_history.append(np.linalg.norm(e_pos))
 
-        Xdot_cmd = Xd_dot + Kp_pos @ e_x + Kd_pos @ e_xdot
+        return qdot_cmd, X, Xdot_real, Q_act, omega_real
 
-        # Converti in velocità giunti
-        J_pinv = np.linalg.pinv(J_pos, rcond=1e-2)
-        qdot_cmd = J_pinv @ Xdot_cmd
-
-        return qdot_cmd
 
     def compute_performance_indices(self, dt):
         e = np.array(self.error_history)
