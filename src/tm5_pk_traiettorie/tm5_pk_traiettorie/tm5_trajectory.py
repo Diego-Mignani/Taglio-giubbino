@@ -21,8 +21,6 @@ class TrajectoryManager(Node):
         self.declare_parameter('robot_description', '')
         self.robot_desc = self.get_parameter('robot_description').get_parameter_value().string_value
         print("DEBUG robot_description:", self.robot_desc)
-
-
         self.kinematics = kinematics.KDLKinematics6DOF(self.robot_desc)
 
         self.q_home = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]) # Da cambiare
@@ -32,6 +30,7 @@ class TrajectoryManager(Node):
         self.X_home = self.kinematics.position_from_T(self.T_home)
         self.R_home = self.kinematics.rotation_from_T(self.T_home)
         self.Q_home = self.kinematics.quaternion_from_R(self.R_home)   #90 0 0   offset x è 90
+        
         # Subscriber per i waypoint generati dal PointsGenerator
         self.sub_trajectory = self.create_subscription(
             Float64MultiArray, 
@@ -85,7 +84,7 @@ class TrajectoryManager(Node):
         # APPROACH (home → primo punto)
         # -------------------------------
         approach_traj1 = self.linear_cartesian_segment(
-            self.X_home, X_first1, self.dt, duration=1.5,
+            self.X_home, X_first1, self.dt, duration=3,
             Q_start=self.Q_home, Q_end=self.Q_down
         )
 
@@ -93,7 +92,7 @@ class TrajectoryManager(Node):
         # RETREAT (ultimo punto → home)
         # -------------------------------
         retreat_traj1 = self.linear_cartesian_segment(
-            X_last1, self.X_home, self.dt, duration=1.5, 
+            X_last1, self.X_home, self.dt, duration=3, 
             Q_start=self.Q_down, Q_end=self.Q_down
         )
         
@@ -101,7 +100,7 @@ class TrajectoryManager(Node):
         # APPROACH (home → primo punto)
         # -------------------------------
         approach_traj2 = self.linear_cartesian_segment(
-            self.X_home, X_first2, self.dt, duration=1.5, 
+            self.X_home, X_first2, self.dt, duration=3, 
             Q_start=self.Q_down, Q_end=self.Q_down
         )
 
@@ -109,13 +108,21 @@ class TrajectoryManager(Node):
         # RETREAT (ultimo punto → home)
         # -------------------------------
         retreat_traj2 = self.linear_cartesian_segment(
-            X_last2, self.X_home, self.dt, duration=1.5 , 
+            X_last2, self.X_home, self.dt, duration=3, 
             Q_start=self.Q_down, Q_end=self.Q_home
         )
 
         # traiettoria totale: approach + tracking + retreat
         full_traj = approach_traj1 + self.tracking_traj1 + retreat_traj1 + approach_traj2 + self.tracking_traj2 + retreat_traj2
         
+        # Riallina i timestamp cumulativi
+        t_offset = 0.0
+        for p in full_traj:
+            p.t = p.t + t_offset
+            if p.t > t_offset:
+                t_offset = p.t
+
+
         # --- SERIALIZZAZIONE PER ROS 2 ---
         # Creiamo un'unica lista piatta: [t1, x1, y1, z1, vx1, vy1, vz1, ax1, ay1, az1, t2, x2, ...]
         flat_data = []
@@ -131,16 +138,13 @@ class TrajectoryManager(Node):
         # Pubblica solo X,Y,Z per Unity
         flat_xyz = []
         for p in full_traj:
-            flat_xyz.extend([p.X[0], p.X[1], p.X[2],*p.Q])
-            #flat_xyz.extend([p.X[0], p.X[1], p.X[2]])
+            flat_xyz.extend([p.X[0], p.X[1], p.X[2], *p.Q])
 
         msg_xyz = Float64MultiArray()
         msg_xyz.data = flat_xyz
         self.visualizza_unity.publish(msg_xyz)
 
- 
- 
-    def plan_from_points(self, points_3d, vmax=0.2, amax=0.5, jmax=0.8, smooth=0.01):
+    def plan_from_points(self, points_3d, vmax=0.6, amax=0.8, jmax=0.8, smooth=0.01):
         """
         Genera una traiettoria liscia e time-scaled dai punti dati.
 
@@ -162,6 +166,9 @@ class TrajectoryManager(Node):
         t, s_t, v_t, a_t = self._trapezoidal_time_scaling(L, vmax, amax)
         #t, s_t, v_t, a_t = self._trapezoidal_acceleration_profile(L, amax, jmax)
 
+        # DEBUG: plot dei profili temporali
+        #self.plot_time_scaling(t, s_t, v_t, a_t)
+
         # 4) valutazione Xd, Xd_dot, Xd_ddot
         Xd, Xd_dot, Xd_ddot = self.evaluate_trajectory(tck_x, tck_y, tck_z,
                                                         s_t, v_t, a_t)
@@ -180,6 +187,40 @@ class TrajectoryManager(Node):
             )
 
         return trajectory
+
+    '''
+    def plot_time_scaling(self, t, s_t, v_t, a_t):
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        # jerk numerico
+        j_t = np.gradient(a_t, t)
+
+        plt.figure(figsize=(12, 10))
+
+        plt.subplot(4, 1, 1)
+        plt.plot(t, s_t, label="s(t)")
+        plt.title("Ascissa curvilinea s(t)")
+        plt.grid(True)
+
+        plt.subplot(4, 1, 2)
+        plt.plot(t, v_t, label="v(t)")
+        plt.title("Velocità v(t)")
+        plt.grid(True)
+
+        plt.subplot(4, 1, 3)
+        plt.plot(t, a_t, label="a(t)")
+        plt.title("Accelerazione a(t)")
+        plt.grid(True)
+
+        plt.subplot(4, 1, 4)
+        plt.plot(t, j_t, label="j(t)")
+        plt.title("Jerk j(t)")
+        plt.grid(True)
+
+        plt.tight_layout()
+        plt.show()
+    '''
 
     # ----------------------------------------------------------
     #  FUNZIONI INTERNE

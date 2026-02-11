@@ -59,17 +59,11 @@ class JointSpaceController6DOF:
         R_act = self.kinematics.rotation_from_T(T)
         q_actual = self.kinematics.quaternion_from_R(R_act)
 
-        rpy_des = R.from_quat(Qd).as_euler('xyz', degrees=True)
-        rpy_act = R.from_quat(q_actual).as_euler('xyz', degrees=True)
-        print(f"RPY_des={rpy_des}, RPY_act={rpy_act}")
-
         # === Errori cartesiani ===
         e_pos = Xd - X_actual
         e_ori = self.kinematics.quat_error(Qd, q_actual)
-        e_ori = self.kinematics.quat_error(Qd, q_actual)
         e_ori = self.w_ori * e_ori
         e_ori = np.clip(e_ori, -0.6, 0.6)
-
 
         # === 1) IK SOLO POSIZIONE ===
         qd_raw = self.kinematics.ik_position(Xd, q_seed=q)
@@ -80,7 +74,6 @@ class JointSpaceController6DOF:
 
         delta_q_ori = self.K_ori * np.linalg.pinv(J_omega) @ e_ori
         qd_raw += delta_q_ori
-        qd_raw = qd_raw + delta_q_ori
 
         # === filtro su qd ===
         if not hasattr(self, "qd_prev"):
@@ -124,9 +117,6 @@ class JointSpaceController6DOF:
         self.error_history.append(np.linalg.norm(e_q))
 
         return u, qd, qd_dot, qd_ddot
-
-
-
 
     #---------------------------------------------------------
     #    CONTROLLO ALESSANDRO SPAZIO DEI GIUNTI POSIZIONE
