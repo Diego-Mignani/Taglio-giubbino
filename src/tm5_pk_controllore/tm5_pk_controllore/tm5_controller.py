@@ -18,8 +18,6 @@ from rclpy.clock import Clock, ClockType
 import numpy as np 
 import matplotlib.pyplot as plt
 
-
-
 class RobotController(Node):
     def __init__(self):
         super().__init__('tm5_robot_controller')
