@@ -12,6 +12,7 @@ from .joint_controller import JointSpaceController6DOF
 import os
 import threading
 import time
+from .tm5_salva_dati import SalvaDati
 
 import numpy as np 
 
@@ -63,7 +64,8 @@ class RobotController(Node):
             K_ori=self.K_ori,
             w_ori=self.w_ori
         )
-        
+        self.salva_dati = SalvaDati()
+
         # Variabili per la traiettoria desiderata
         self.full_traj = []
         self.traiettoria_pronta = False
@@ -94,7 +96,6 @@ class RobotController(Node):
         self.get_logger().info("Thread di controllo avviato.")
 
         # Log dei dati per analisi post-traiettoria
-        self.log_data = []
         self.prev_q = None
         self.prev_t = None
 
@@ -257,33 +258,11 @@ class RobotController(Node):
         now = self.steady_clock.now().nanoseconds * 1e-9
         t_real = now - self.t0_traj
 
+        # Condizione di fine traiettoria: se il tempo reale supera l'ultimo punto e non abbiamo già segnato la fine
         if t_real >= self.full_traj[-1].t and not self.traj_finita:
-
-            self.get_logger().info("[DEBUG] Fine traiettoria raggiunta (tempo)")
-
             self.traj_finita = True
-            dt_array = np.array(self.dt_log, dtype=float)
-            dt_mean = np.mean(self.dt_log)
-            dt_max = np.max(self.dt_log)
-            dt_min = np.min(self.dt_log)
-            conteggio = np.sum(dt_array > 0.12)
-
-            IAE, ISE, ITAE, RMSE = self.controller.compute_performance_indices(dt_mean)
-
-            self.get_logger().info("=== INDICI DI PRESTAZIONE ===")
-            self.get_logger().info(f"IAE  = {IAE:.6f}")
-            self.get_logger().info(f"ISE  = {ISE:.6f}")
-            self.get_logger().info(f"ITAE = {ITAE:.6f}")
-            self.get_logger().info(f"RMSE = {RMSE:.6f}")
-            self.get_logger().info("==============================")
-
-            self.salva_dati(IAE, ISE, ITAE, RMSE, dt_mean, dt_max, dt_min, conteggio)
-            self.salva_log_traiettoria()
-            self.get_logger().info(
-                f"dt_real — media: {dt_mean:.6f}, max: {dt_max:.6f}, min: {dt_min:.6f}"
-            )
+            self.salva_dati.salva(self.dt_log, self.controller, self.get_logger(), self.Kp, self.Kd, self.K_ori, self.w_ori)
             return
-
 
         # Se Unity non è ancora connesso, non calcolare nulla
         if not self.unity_connected or self.current_js is None:
@@ -329,17 +308,9 @@ class RobotController(Node):
         msg.data = q_new.tolist()
         self.publisher.publish(msg)
 
-        self.log_data.append({
-            "t":        t_real,
-            "Xd":       Xd.copy(),
-            "Xd_dot":   Xd_dot.copy(),
-            "Xd_ddot":  Xd_ddot.copy(),
-            "X":        X.copy(),
-            "Xdot":     Xdot_real.copy(),
-            "Qd":       Qd.copy(),
-            "Q":        Q_act.copy(),
-            "omega":    omega_real.copy(),
-        })
+        self.salva_dati.aggiorna_log_traiettoria(
+            t_real, Xd, Xd_dot, Xd_ddot, X, Xdot_real, Qd, Q_act, omega_real
+        )
             
 
     def evaluate(self):
@@ -387,78 +358,6 @@ class RobotController(Node):
         Qd = p0.Q if alpha < 0.5 else p1.Q
 
         return Xd, Xd_dot, Xd_ddot, Qd
-
-    def salva_log_traiettoria(self):
-        save_dir = os.path.expanduser("~/ros2_ws/log_traj")
-        os.makedirs(save_dir, exist_ok=True)
-        file_path = os.path.join(save_dir, "traj_log.csv")
-
-        import csv
-        with open(file_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                "t",
-                "Xd_x","Xd_y","Xd_z",
-                "Xd_dot_x","Xd_dot_y","Xd_dot_z",
-                "Xd_ddot_x","Xd_ddot_y","Xd_ddot_z",
-                "X_x","X_y","X_z",
-                "Xdot_x","Xdot_y","Xdot_z",
-                "Qd_x","Qd_y","Qd_z","Qd_w",
-                "Q_x","Q_y","Q_z","Q_w",
-                "omega_x","omega_y","omega_z"
-            ])
-
-            for row in self.log_data:
-                writer.writerow([
-                    row["t"],
-                    *row["Xd"],
-                    *row["Xd_dot"],
-                    *row["Xd_ddot"],
-                    *row["X"],
-                    *row["Xdot"],
-                    *row["Qd"],
-                    *row["Q"],
-                    *row["omega"]
-                ])
-
-    # ------------------------------------------------------------------
-    # SALVATAGGIO PRESTAZIONI
-    # ------------------------------------------------------------------
-    def salva_dati(self, IAE, ISE, ITAE, RMSE, dt_mean, dt_max, dt_min, conteggio):
-        save_dir = os.path.expanduser("~/ros2_ws/prestazioni")
-        os.makedirs(save_dir, exist_ok=True)
-        file_path = os.path.join(save_dir, "prestazioni_robot.csv")
-
-        write_header = not os.path.exists(file_path)
-
-        Kp_str = ",".join(map(str, np.diag(self.Kp).tolist()))
-        Kd_str = ",".join(map(str, np.diag(self.Kd).tolist()))
-
-        with open(file_path, mode="a", newline="") as f:
-            writer = csv.writer(f, delimiter=';')
-            if write_header:
-                writer.writerow([
-                    "timestamp", "IAE", "ISE", "ITAE", "RMSE",
-                    "Kp", "Kd", "K_ori", "w_ori",
-                    "traj_len", "dt_mean", "dt_max", "dt_min", "conteggio_dt>0.12"
-                ])
-
-            writer.writerow([
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                f"{IAE:.6f}".replace('.', ','),
-                f"{ISE:.6f}".replace('.', ','),
-                f"{ITAE:.6f}".replace('.', ','),
-                f"{RMSE:.6f}".replace('.', ','),
-                Kp_str,
-                Kd_str,
-                self.K_ori,
-                self.w_ori,
-                len(self.full_traj),
-                dt_mean,
-                dt_max,
-                dt_min,
-                conteggio
-            ])
 
 def main():
     rclpy.init()
