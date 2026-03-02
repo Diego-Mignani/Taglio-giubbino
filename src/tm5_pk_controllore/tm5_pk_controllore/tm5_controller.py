@@ -1,44 +1,44 @@
-from datetime import datetime
-import csv
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float64MultiArray
 from tm5_pk_traiettorie.types import CartesianTrajectoryPoint
 from sensor_msgs.msg import JointState
-import numpy as np
+from rclpy.clock import Clock, ClockType
 from std_msgs.msg import Bool
-from geometry_msgs.msg import Pose
+import numpy as np
+from datetime import datetime
+import csv
 from .joint_controller import JointSpaceController6DOF
-from my_robot_utils import kinematics
 import os
 import threading
 import time
-from scipy.spatial.transform import Rotation as R
-from rclpy.clock import Clock, ClockType
+
 import numpy as np 
-import matplotlib.pyplot as plt
 
 class RobotController(Node):
     def __init__(self):
         super().__init__('tm5_robot_controller')
 
-        self.steady_clock = Clock(clock_type=ClockType.STEADY_TIME)
-
-        # Stato simulato del robot
-        self.q_sim = np.zeros(6)
-        self.qdot_sim = np.zeros(6)
-        self.state_initialized = False
-
-        self.dt_log = []
-        self.t = 0.0
-        self.t_traj = 0.0
-
-        self.last_js_time = 0.0
-        self.traj_finita = False
-
         # Parametro URDF
         self.declare_parameter('robot_description', '')
         self.robot_desc = self.get_parameter('robot_description').get_parameter_value().string_value
+
+        # Clock per misurare il tempo reale tra i callback
+        self.steady_clock = Clock(clock_type=ClockType.STEADY_TIME)
+
+        # Stato simulato del robot
+        self.q_sim             = np.zeros(6)
+        self.qdot_sim          = np.zeros(6)
+        self.state_initialized = False
+
+        # Log dei dt reali per analisi post-traiettoria
+        self.dt_log = []
+        self.t      = 0.0
+        self.t_traj = 0.0
+
+        # Variabile per indicare se la traiettoria è finita
+        self.last_js_time = 0.0
+        self.traj_finita  = False
 
         # Parametri di design del controller
         self.dt = 0.1  # 30Hz coerente con Unity (valore nominale)
@@ -48,10 +48,10 @@ class RobotController(Node):
         self.declare_parameter('w_ori')
 
         # Placeholder iniziali (veri valori arrivano dal YAML)
-        self.Kp = np.eye(6)
-        self.Kd = np.eye(6)
-        self.K_ori = 1.0
-        self.w_ori = 1.0
+        self.Kp     = np.eye(6)
+        self.Kd     = np.eye(6)
+        self.K_ori  = 1.0
+        self.w_ori  = 1.0
 
         self.param_timer = self.create_timer(0.1, self.load_params_once)
 
@@ -63,61 +63,38 @@ class RobotController(Node):
             K_ori=self.K_ori,
             w_ori=self.w_ori
         )
-
-        self.traj_duration = 0.0
-
-        # Variabili di stato del controller
-        self.q_dot_cmd = np.zeros(6)
-        self.q_cmd = np.zeros(6, dtype=float)
-
-        # Cinematica
-        self.kinematics = kinematics.KDLKinematics6DOF(self.robot_desc)
-        self.num_joints = self.kinematics.num_joints
-
+        
         # Variabili per la traiettoria desiderata
-        self.traj_index = 0
         self.full_traj = []
         self.traiettoria_pronta = False
 
-        # Feedback posa end-effector da Unity
-        self.posizione_reale_unity = np.zeros(3)
-        self.orientazione_reale_unity = np.zeros(4)
-        self.ee_pose_valid = False
-
         # Stato corrente giunti
-        self.current_js = JointState()
+        self.current_js          = JointState()
         self.current_js.position = [0.0] * 6
         self.current_js.velocity = [0.0] * 6
 
         # NIENTE timer per il controllo: useremo un thread dedicato
         self.control_flag = False
-        self.dt_real = self.dt  # fallback
-        self.control_thread_started = False
+        self.dt_real      = self.dt  # fallback
 
         # Vari canali di comunicazione
-        self.publisher = self.create_publisher(Float64MultiArray, 'joint_commands', 10)
-        self.pose_ee_subscription = self.create_subscription(
-            Pose, 'unity_end_effector_pose', self.pose_ee_feedback_callback, 10
-        )
-        self.joint_feedback_sub = self.create_subscription(
-            JointState, 'unity_joint_feedback', self.joint_feedback_callback, 10
-        )
-        self.traj_sub = self.create_subscription(
-            Float64MultiArray, 'trajectory', self.receive_trajectory, 10
-        )
-        self.ready_pub = self.create_publisher(Bool, 'robot_ready', 10)
+        self.publisher          = self.create_publisher(   Float64MultiArray, 'joint_commands',                                     10)
+        self.joint_feedback_sub = self.create_subscription(JointState,        'unity_joint_feedback', self.joint_feedback_callback, 10)
+        self.traj_sub           = self.create_subscription(Float64MultiArray, 'trajectory',           self.receive_trajectory,      10)
+        self.ready_pub          = self.create_publisher(   Bool,              'robot_ready',                                        10)
+        self.unity_ready_sub    = self.create_subscription(Bool,              'unity_ready',          self.unity_ready_callback,    10)
+
+        # Handshake e stato di connessione
         self.unity_ready = False
-        self.unity_ready_sub = self.create_subscription(
-            Bool, 'unity_ready', self.unity_ready_callback, 10
-        )
         self.unity_connected = False
 
         # Thread di controllo dedicato
         self.control_thread = threading.Thread(target=self.control_loop, daemon=True)
         self.control_thread.start()
-        self.control_thread_started = True
         self.get_logger().info("Thread di controllo avviato.")
-        self.log_data = []   # lista di dizionari
+
+        # Log dei dati per analisi post-traiettoria
+        self.log_data = []
         self.prev_q = None
         self.prev_t = None
 
@@ -161,17 +138,6 @@ class RobotController(Node):
         # Disattiva il timer
         self.param_timer.cancel()
 
-    def pose_ee_feedback_callback(self, msg):
-        """
-        Callback per ricevere la posa reale dell'end-effector da Unity.
-        """
-        self.posizione_reale_unity = np.array(
-            [msg.position.x, msg.position.y, msg.position.z], dtype=float
-        )
-        self.orientazione_reale_unity = np.array(
-            [msg.orientation.x, msg.orientation.y, msg.orientation.z, msg.orientation.w]
-        )
-        self.ee_pose_valid = True
 
     def joint_feedback_callback(self, msg):
         """
@@ -224,7 +190,6 @@ class RobotController(Node):
         """
         Callback per ricevere la traiettoria desiderata.
         """
-        self.traj_index = 0
         self.traiettoria_pronta = True
         self.traj_finita = False
         self.dt_log = []
@@ -317,7 +282,6 @@ class RobotController(Node):
             self.get_logger().info(
                 f"dt_real — media: {dt_mean:.6f}, max: {dt_max:.6f}, min: {dt_min:.6f}"
             )
-            self.plotta_traiettoria()
             return
 
 
@@ -327,7 +291,6 @@ class RobotController(Node):
 
         # 1. Traiettoria desiderata
         Xd, Xd_dot, Xd_ddot, Qd = self.evaluate()
-
 
         now = self.steady_clock.now().nanoseconds * 1e-9
         q = np.array(self.current_js.position)
@@ -367,14 +330,15 @@ class RobotController(Node):
         self.publisher.publish(msg)
 
         self.log_data.append({
-            "t": t_real,
-            "Xd": Xd.copy(),
-            "Xd_dot": Xd_dot.copy(),
-            "Xd_ddot": Xd_ddot.copy(),
-            "X": X.copy(),
-            "Xdot": Xdot_real.copy(),
-            "Q": Q_act.copy(),
-            "omega": omega_real.copy(),
+            "t":        t_real,
+            "Xd":       Xd.copy(),
+            "Xd_dot":   Xd_dot.copy(),
+            "Xd_ddot":  Xd_ddot.copy(),
+            "X":        X.copy(),
+            "Xdot":     Xdot_real.copy(),
+            "Qd":       Qd.copy(),
+            "Q":        Q_act.copy(),
+            "omega":    omega_real.copy(),
         })
             
 
@@ -424,7 +388,6 @@ class RobotController(Node):
 
         return Xd, Xd_dot, Xd_ddot, Qd
 
-
     def salva_log_traiettoria(self):
         save_dir = os.path.expanduser("~/ros2_ws/log_traj")
         os.makedirs(save_dir, exist_ok=True)
@@ -440,6 +403,7 @@ class RobotController(Node):
                 "Xd_ddot_x","Xd_ddot_y","Xd_ddot_z",
                 "X_x","X_y","X_z",
                 "Xdot_x","Xdot_y","Xdot_z",
+                "Qd_x","Qd_y","Qd_z","Qd_w",
                 "Q_x","Q_y","Q_z","Q_w",
                 "omega_x","omega_y","omega_z"
             ])
@@ -452,10 +416,10 @@ class RobotController(Node):
                     *row["Xd_ddot"],
                     *row["X"],
                     *row["Xdot"],
+                    *row["Qd"],
                     *row["Q"],
                     *row["omega"]
                 ])
-
 
     # ------------------------------------------------------------------
     # SALVATAGGIO PRESTAZIONI
@@ -495,47 +459,6 @@ class RobotController(Node):
                 dt_min,
                 conteggio
             ])
-
-    def plotta_traiettoria(self):
-        file_path = os.path.expanduser("~/ros2_ws/log_traj/traj_log.csv") 
-        data = np.genfromtxt(file_path, delimiter=",", skip_header=1)
-
-        t = data[:,0]
-        Xd = data[:,1:4]
-        Xd_dot = data[:,4:7]
-        Xd_ddot = data[:,7:10]
-        X = data[:,10:13]
-        Xdot = data[:,13:16]
-
-        acc_act = np.gradient(Xdot[:,0], t)
-        jerk_act = np.gradient(acc_act, t)
-        jerk_des = np.gradient(Xd_ddot[:,0], t)
-
-        plt.figure(figsize=(12,10))
-
-        plt.subplot(4,1,1)
-        plt.plot(t, Xd[:,0], label="X_des")
-        plt.plot(t, X[:,0], label="X_act")
-        plt.legend(); plt.title("Posizione")
-
-        plt.subplot(4,1,2)
-        plt.plot(t, Xd_dot[:,0], label="Vx_des")
-        plt.plot(t, Xdot[:,0], label="Vx_act")
-        plt.legend(); plt.title("Velocità")
-
-        plt.subplot(4,1,3)
-        plt.plot(t, Xd_ddot[:,0], label="Ax_des")
-        plt.plot(t, acc_act, label="Ax_act")
-        plt.legend(); plt.title("Accelerazione")
-
-        plt.subplot(4,1,4)
-        plt.plot(t, jerk_des, label="Jx_des")
-        plt.plot(t, jerk_act, label="Jx_act")
-        plt.legend(); plt.title("Jerk")
-
-        plt.tight_layout()
-        plt.show()
-
 
 def main():
     rclpy.init()
