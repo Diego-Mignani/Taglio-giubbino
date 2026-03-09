@@ -1,0 +1,2 @@
+robot_description: |
+  $(find tm_description)/urdf/tm5-900.urdf

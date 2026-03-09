@@ -1,0 +1,13 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 100
+
+tm5_arm_controller:
+  type: joint_trajectory_controller/JointTrajectoryController
+  joints:
+    - joint_1
+    - joint_2
+    - joint_3
+    - joint_4
+    - joint_5
+    - joint_6

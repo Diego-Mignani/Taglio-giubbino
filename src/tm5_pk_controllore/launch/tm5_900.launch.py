@@ -2,6 +2,11 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch_ros.actions import Node
+from launch.actions import IncludeLaunchDescription 
+from launch.launch_description_sources import PythonLaunchDescriptionSource 
+from launch_ros.substitutions import FindPackageShare 
+from launch.substitutions import PathJoinSubstitution
+
 
 def generate_launch_description():
     # Recupera il percorso dell'URDF
@@ -17,7 +22,18 @@ def generate_launch_description():
     controller_pkg = get_package_share_directory('tm5_pk_controllore') 
     gains_yaml = os.path.join(controller_pkg, 'config', 'controller_gains.yaml')
 
+    moveit_launch = IncludeLaunchDescription( 
+        PythonLaunchDescriptionSource( 
+           PathJoinSubstitution([ 
+              FindPackageShare("tm5_moveit_config"), 
+              "launch", 
+              "move_group.launch.py" 
+           ]) 
+        ) 
+    )
+
     return LaunchDescription([
+        moveit_launch,
         Node(
             package='ros_tcp_endpoint',
             executable='default_server_endpoint',
