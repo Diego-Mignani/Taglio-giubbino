@@ -42,6 +42,11 @@ def generate_launch_description():
                 {'ROS_IP': '0.0.0.0'},
             ]
         ),
+        Node(
+            package="tm5_pk_controllore",
+            executable="tm5_joint_state_bridge",
+            output="screen"
+        ),
 
         Node(
             package='tm5_pk_controllore',

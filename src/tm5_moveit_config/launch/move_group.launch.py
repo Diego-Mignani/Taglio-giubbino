@@ -50,6 +50,7 @@ def generate_launch_description():
                 {"robot_description_kinematics": kinematics_yaml},
                 {"robot_description_planning": ompl_yaml},
                 {"robot_description_planning_scene": joint_limits_yaml},
+                {"move_group.planning_plugin": "ompl_interface/OMPLPlanner"},
             ],
         )
     ])

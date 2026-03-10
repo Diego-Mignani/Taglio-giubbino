@@ -11,3 +11,5 @@ controller_list:
       - joint_4
       - joint_5
       - joint_6
+move_group:
+  planning_plugin: ompl_interface/OMPLPlanner

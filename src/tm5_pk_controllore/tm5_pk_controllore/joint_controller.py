@@ -42,73 +42,25 @@ class JointSpaceController6DOF:
         self.alpha_qd = 0.2      # filtro su posizione desiderata
         self.alpha_qd_dot = 0.2  # filtro su velocità desiderata
 
-    def compute_command_operational(self, js, Xd, Xd_dot, Xd_ddot, Qd):
+    def compute_command_joint(self, q, q_dot, qd, qd_dot):
         """
-        Controllo in spazio operativo (posizione + velocità + accelerazione)
-        con Jacobiano smorzato e comando in velocità dei giunti.
-        Compatibile con Unity (nessun modello dinamico richiesto).
+        Controllo PD in spazio dei giunti:
+        q, q_dot: stato attuale
+        qd, qd_dot: riferimento da MoveIt2
+        Ritorna: qdot_cmd
         """
+        e = qd - q
+        e_dot = qd_dot - q_dot
 
-        # --- Stato reale ---
-        q = np.array(js.position)
-        q_dot = np.array(js.velocity) if len(js.velocity) == 6 else np.zeros(6)
+        # Kp, Kd sono 6x6
+        qdot_cmd = qd_dot + self.Kp @ e + self.Kd @ e_dot
 
-        # --- Cinematica diretta ---
-        T = self.kinematics.fk_6dof(q)
-        X = self.kinematics.position_from_T(T)
-        R_act = self.kinematics.rotation_from_T(T)
-        Q_act = self.kinematics.quaternion_from_R(R_act)
-
-        # --- Jacobiano ---
-        J = self.kinematics.get_full_jacobian(q)
-        J_pos = J[:3, :]      # parte lineare
-        J_ori = J[3:6, :]     # parte angolare
-
-        # --- Errori cartesiani ---
-        e_pos = Xd - X
-        e_ori = self.kinematics.quat_error(Qd, Q_act)
-
-        # errore orientazione come angolo equivalente
-        err_ori = self.orientation_error_angle(Qd, Q_act)
-
-        # errore totale combinato (posizione + orientazione)
-        err_total = np.linalg.norm(e_pos) + err_ori
-
-        self.error_history.append(err_total)
-
-        # --- Velocità cartesiana reale ---
-        Xdot_real = J_pos @ q_dot
-        omega_real = J_ori @ q_dot
-
-        e_vel = Xd_dot - Xdot_real
-        e_omega = omega_d = Xd_ddot*0  # placeholder se vuoi aggiungere orientazione dinamica
-
-        # --- Controllo posizione ---
-        Kp_pos = self.Kp[:3, :3]
-        Kd_pos = self.Kd[:3, :3]
-        Xddot_cmd = Xd_ddot + Kp_pos @ e_pos + Kd_pos @ e_vel
-
-        # --- Controllo orientazione ---
-        Kp_ori = self.K_ori * np.eye(3)
-        Kd_ori = self.w_ori * np.eye(3)
-        omega_des = np.zeros(3)
-        omega_err = omega_des - omega_real
-        omega_cmd = Kp_ori @ e_ori + Kd_ori @ omega_err
-
-        # --- Comando cartesiano completo ---
-        V_cmd = np.hstack([Xddot_cmd, omega_cmd])
-
-        # --- Jacobiano completo (damped least squares) ---
-        lambda2 = 1e-4
-        J_pinv = J.T @ np.linalg.inv(J @ J.T + lambda2 * np.eye(6))
-
-        qdot_cmd = q_dot + J_pinv @ (V_cmd * self.dt)
-
-        # --- Saturazione ---
+        # saturazione
         max_qdot = 2.0
         qdot_cmd = np.clip(qdot_cmd, -max_qdot, max_qdot)
 
-        return qdot_cmd, X, Xdot_real, Q_act, omega_real
+        return qdot_cmd
+
 
 
     def compute_performance_indices(self, dt):

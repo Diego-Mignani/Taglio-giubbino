@@ -32,6 +32,7 @@ setup(
         'console_scripts': [
             'comunica_robot = tm5_pk_controllore.tm5_comunicator:main',
             'controlla_robot = tm5_pk_controllore.tm5_controller:main',
+            'tm5_joint_state_bridge = tm5_pk_controllore.tm5_joint_state_bridge:main',
         ],
     },
 )

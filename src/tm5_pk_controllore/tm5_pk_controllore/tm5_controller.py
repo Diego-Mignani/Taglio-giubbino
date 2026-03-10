@@ -134,6 +134,7 @@ class RobotController(Node):
         self.controller.Kp = self.Kp
         self.controller.Kd = self.Kd
         self.controller.K_ori = self.K_ori
+    
         self.controller.w_ori = self.w_ori
 
         # Disattiva il timer
@@ -188,30 +189,26 @@ class RobotController(Node):
         self.control_flag = True
 
     def receive_trajectory(self, msg):
-        """
-        Callback per ricevere la traiettoria desiderata.
-        """
-        self.traiettoria_pronta = True
-        self.traj_finita = False
-        self.dt_log = []
+        try:
+            self.traiettoria_pronta = True
+            self.traj_finita = False
+            self.dt_log = []
 
-        # Tempo di inizio traiettoria (tempo assoluto ROS2)
-        self.t0_traj = self.steady_clock.now().nanoseconds * 1e-9
+            self.t0_traj = self.steady_clock.now().nanoseconds * 1e-9
 
-        data = np.array(msg.data).reshape(-1, 14)
-        self.full_traj = []
+            data = np.array(msg.data)
+            self.get_logger().info(f"Traiettoria raw len={len(data)}")
+            data = data.reshape(-1, 7)
+            self.full_traj = data
 
-        for row in data:
-            point = CartesianTrajectoryPoint(
-                X=row[1:4],      # Posizione
-                Xdot=row[4:7],   # Velocità
-                Xddot=row[7:10], # Accelerazione
-                t=row[0],
-                Q=row[10:14]
+            self.get_logger().info(
+                f"Ricevuta traiettoria joint di {len(self.full_traj)} punti, "
+                f"t_finale = {self.full_traj[-1,0]:.3f}"
             )
-            self.full_traj.append(point)
+        except Exception as e:
+            self.get_logger().error(f"Errore in receive_trajectory: {e}")
 
-        self.get_logger().info(f"Ricevuta traiettoria di {len(self.full_traj)} punti")
+
 
 
     # ------------------------------------------------------------------
@@ -249,115 +246,89 @@ class RobotController(Node):
     # SINGOLO STEP DI CONTROLLO (EX control_callback_sg1)
     # ------------------------------------------------------------------
     def control_step(self):
-        """
-        Un singolo step di controllo (ex control_callback_sg1),
-        richiamato dal loop di controllo con dt_real.
-        """
-
-        # Fine traiettoria basata sul tempo assoluto
+        # Fine traiettoria
         now = self.steady_clock.now().nanoseconds * 1e-9
         t_real = now - self.t0_traj
 
-        # Condizione di fine traiettoria: se il tempo reale supera l'ultimo punto e non abbiamo già segnato la fine
-        if t_real >= self.full_traj[-1].t and not self.traj_finita:
+        if t_real >= self.full_traj[-1, 0] and not self.traj_finita:
             self.traj_finita = True
-            self.salva_dati.salva(self.dt_log, self.controller, self.get_logger(), self.Kp, self.Kd, self.K_ori, self.w_ori)
+            self.salva_dati.salva(self.dt_log, self.controller, self.get_logger(),
+                                self.Kp, self.Kd, self.K_ori, self.w_ori)
             return
 
-        # Se Unity non è ancora connesso, non calcolare nulla
         if not self.unity_connected or self.current_js is None:
             return
 
-        # 1. Traiettoria desiderata
-        Xd, Xd_dot, Xd_ddot, Qd = self.evaluate()
-
-        now = self.steady_clock.now().nanoseconds * 1e-9
+        # stato attuale
         q = np.array(self.current_js.position)
-
         if self.prev_q is None:
-            q_dot_real = np.zeros(6)
+            q_dot = np.zeros(6)
         else:
             dt = now - self.prev_t
-            q_dot_real = (q - self.prev_q) / max(dt, 1e-6)
+            q_dot = (q - self.prev_q) / max(dt, 1e-6)
 
         self.prev_q = q.copy()
         self.prev_t = now
 
-        # Sovrascrivi la velocity del JointState
-        self.current_js.velocity = q_dot_real.tolist()
+        # riferimento da MoveIt2
+        qd, qd_dot = self.evaluate_joint()
 
+        # comando in spazio dei giunti
+        qdot_cmd = self.controller.compute_command_joint(q, q_dot, qd, qd_dot)
 
-        # 2. Comando dal controller
-        qdot_cmd, X, Xdot_real, Q_act, omega_real = self.controller.compute_command_operational(
-            self.current_js,
-            Xd, Xd_dot, Xd_ddot, Qd
-        )
-
-        # 3. Stato attuale
-        q = np.array(self.current_js.position)
-        qdot = np.array(self.current_js.velocity) if len(self.current_js.velocity) == 6 else np.zeros(6)
-
-        # 4. Integrazione dinamica con dt_real
+        # integrazione
         dt = float(self.dt_real) if hasattr(self, "dt_real") else self.dt
-        dt = max(0.0005, min(dt, 0.2))  # clamp di sicurezza
+        dt = max(0.0005, min(dt, 0.2))
 
         q_new = q + qdot_cmd * dt
 
-        # 5. Pubblica verso Unity
+        # pubblica verso Unity
         msg = Float64MultiArray()
         msg.data = q_new.tolist()
         self.publisher.publish(msg)
 
-        self.salva_dati.aggiorna_log_traiettoria(
-            t_real, Xd, Xd_dot, Xd_ddot, X, Xdot_real, Qd, Q_act, omega_real
-        )
+        # se vuoi, qui puoi loggare q, qd, ecc.
+
             
-
-    def evaluate(self):
+        
+    def evaluate_joint(self):
         """
-        Valuta la traiettoria usando il tempo assoluto ROS2.
-        Interpola posizione, velocità e accelerazione.
-        Orientazione: prende il punto più vicino (stabile).
+        Interpola la traiettoria in spazio dei giunti.
+        self.full_traj: array Nx7 con [t, q1..q6]
+        Ritorna: qd, qd_dot
         """
-
-        # tempo reale dall'inizio della traiettoria
         now = self.steady_clock.now().nanoseconds * 1e-9
         t_real = now - self.t0_traj
 
-        times = np.array([p.t for p in self.full_traj])
+        times = self.full_traj[:, 0]
 
         # prima dell'inizio
         if t_real <= times[0]:
-            p = self.full_traj[0]
-            return p.X, p.Xdot, p.Xddot, p.Q
+            qd = self.full_traj[0, 1:]
+            qd_dot = np.zeros(6)
+            return qd, qd_dot
 
         # dopo la fine
         if t_real >= times[-1]:
-            p = self.full_traj[-1]
-            return p.X, p.Xdot, p.Xddot, p.Q
+            qd = self.full_traj[-1, 1:]
+            qd_dot = np.zeros(6)
+            return qd, qd_dot
 
         # trova il primo timestamp >= t_real
         i = np.searchsorted(times, t_real)
 
-        p0 = self.full_traj[i-1]
-        p1 = self.full_traj[i]
+        t0 = times[i-1]
+        t1 = times[i]
+        q0 = self.full_traj[i-1, 1:]
+        q1 = self.full_traj[i, 1:]
 
-        t0 = p0.t
-        t1 = p1.t
-
-        # coefficiente di interpolazione
         alpha = (t_real - t0) / (t1 - t0)
         alpha = np.clip(alpha, 0.0, 1.0)
 
-        # interpolazione lineare posizione/velocità/accelerazione
-        Xd = p0.X + alpha * (p1.X - p0.X)
-        Xd_dot = p0.Xdot + alpha * (p1.Xdot - p0.Xdot)
-        Xd_ddot = p0.Xddot + alpha * (p1.Xddot - p0.Xddot)
+        qd = q0 + alpha * (q1 - q0)
+        qd_dot = (q1 - q0) / max(t1 - t0, 1e-6)
 
-        # orientazione: prendi quella più vicina (stabile)
-        Qd = p0.Q if alpha < 0.5 else p1.Q
-
-        return Xd, Xd_dot, Xd_ddot, Qd
+        return qd, qd_dot
 
 def main():
     rclpy.init()

@@ -1,3 +1,4 @@
+
 import time
 import rclpy
 from rclpy.node import Node
@@ -76,7 +77,51 @@ class PointsGenerator(Node):
         line[:, 0] += wave * normal[0]
         line[:, 1] += wave * normal[1]
 
-        return self.ros_to_unity_position(line)
+        return line
+    
+    def build_full_trajectory(self):
+        """
+        Genera:
+        - punto di avvicinamento (alto)
+        - traiettoria principale (tasca + zip)
+        - punto di ritiro (alto)
+        Il tutto nel frame ROS (base_link).
+        """
+
+        # --- TRAIETTORIA PRINCIPALE (in ROS frame!) ---
+        tasca = self.generate_wavy_trajectory_oblique(
+            start=np.array([0.40, 0.00, 0.45]),
+            end=np.array([0.60, 0.20, 0.45]),
+            num_points=100,
+            amplitude=0.02,
+            frequency=3.0
+        )
+
+        zip = self.generate_pocket_square2(
+            width=0.12,
+            height=0.18,
+            z=0.45,              # Z REALISTICA per TM5
+            n_per_side=25,
+            noise=0.002,
+            offset_x=0.50,
+            offset_y=0.30
+        )
+
+        # --- APPROACH (punto alto sopra il primo waypoint) ---
+        approach = np.array([
+            [tasca[0,0], tasca[0,1], tasca[0,2] + 0.20]
+        ])
+
+        # --- RETREAT (punto alto sopra l’ultimo waypoint) ---
+        retreat = np.array([
+            [zip[-1,0], zip[-1,1], zip[-1,2] + 0.20]
+        ])
+
+        # --- CONCATENAZIONE ---
+        full = np.vstack([approach, tasca, zip, retreat])
+
+        return full
+
     
     def generate_pocket_square2(self, width=0.12, height=0.18, z=0.15, n_per_side=25, 
                                 noise=0.002, offset_x=0.5, offset_y=0.3):
@@ -123,23 +168,23 @@ class PointsGenerator(Node):
         pts[:,0] += offset_x
         pts[:,1] += offset_y
 
-        return self.ros_to_unity_position(pts)
+        return pts
 
 def main():
     rclpy.init()
     node = PointsGenerator()
     try:
-        tasca = node.generate_wavy_trajectory_oblique()
-        zip = node.generate_pocket_square2()
+        full = node.build_full_trajectory()
 
-        # Costruisci la lista piatta
-        flat = [len(tasca), len(zip)] + tasca.flatten().tolist() + zip.flatten().tolist()
-
-        # Invia come array numpy
-        success = node.send_waypoint(np.array(flat))
-
-        if success:
-            time.sleep(0.5)
+        # Test con 3 punti
+        pts = np.array([
+            [0.4, 0.5, 0.45],
+            [0.5, 0.5, 0.45],
+            [0.6, 0.5, 0.45],
+            [0.7, 0.5, 0.45],
+        ])
+        flat = [len(pts)] + pts.flatten().tolist()
+        node.send_waypoint(np.array(flat))  # o adegua alla tua API attuale
 
     except KeyboardInterrupt:
         node.get_logger().info('Chiusura forzata dall\'utente.')
