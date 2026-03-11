@@ -1,10 +1,10 @@
-
-import time
-import rclpy
-from rclpy.node import Node
 from std_msgs.msg import Float64MultiArray
+from std_msgs.msg import Bool
+from rclpy.node import Node
 import numpy as np
-from std_msgs.msg import Bool 
+import rclpy
+import time
+from my_robot_utils import kinematics
 
 class PointsGenerator(Node):
     def __init__(self):
@@ -16,6 +16,13 @@ class PointsGenerator(Node):
         # Subscriber per il segnale di pronto
         self.ready_to_send = False
         self.create_subscription(Bool, 'robot_ready', self.ready_callback, 10)
+        
+        self.declare_parameter('robot_description', '')
+        self.robot_desc = self.get_parameter('robot_description').get_parameter_value().string_value
+        print("DEBUG robot_description:", self.robot_desc)
+
+
+        self.kinematics = kinematics.KDLKinematics6DOF(self.robot_desc)
 
     def ready_callback(self, msg):
         if msg.data:
@@ -52,7 +59,7 @@ class PointsGenerator(Node):
         p_unity[:,2] = p_ros[:,2]   # Unity.y = ROST.z = ROS.z
         return p_unity
 
-    def generate_wavy_trajectory_oblique(self, start=np.array([0.3, 0.0, 0.15]), end=np.array([0.9, 0.5, 0.15]),
+    def generate_zip(self, start=np.array([0.3, 0.0, 0.15]), end=np.array([0.9, 0.5, 0.15]),
                                         num_points=100, amplitude=0.02, frequency=3.0):
         """
         Genera una traiettoria obliqua nel piano X-Y con ondulazione sinusoidale.
@@ -87,40 +94,43 @@ class PointsGenerator(Node):
         - punto di ritiro (alto)
         Il tutto nel frame ROS (base_link).
         """
-
+        
         # --- TRAIETTORIA PRINCIPALE (in ROS frame!) ---
-        tasca = self.generate_wavy_trajectory_oblique(
-            start=np.array([0.40, 0.00, 0.45]),
-            end=np.array([0.60, 0.20, 0.45]),
-            num_points=100,
-            amplitude=0.02,
-            frequency=3.0
-        )
+        zip = self.generate_zip()
+        tasca = self.generate_pocket_square2()
+        q_start = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        
+        T_home = self.kinematics.fk_6dof(q_start)  
+        X_home = self.kinematics.position_from_T(T_home)
 
-        zip = self.generate_pocket_square2(
-            width=0.12,
-            height=0.18,
-            z=0.45,              # Z REALISTICA per TM5
-            n_per_side=25,
-            noise=0.002,
-            offset_x=0.50,
-            offset_y=0.30
-        )
+        approach_traj1 = self.linear_segment(X_home, zip[0])
 
-        # --- APPROACH (punto alto sopra il primo waypoint) ---
-        approach = np.array([
-            [tasca[0,0], tasca[0,1], tasca[0,2] + 0.20]
-        ])
+        # -------------------------------
+        # RETREAT (ultimo punto → home)
+        # -------------------------------
+        retreat_traj1 = self.linear_segment(zip[-1], X_home)
 
-        # --- RETREAT (punto alto sopra l’ultimo waypoint) ---
-        retreat = np.array([
-            [zip[-1,0], zip[-1,1], zip[-1,2] + 0.20]
-        ])
+
+        approach_traj2= self.linear_segment(X_home, tasca[0])
+
+        # -------------------------------
+        # RETREAT (ultimo punto → home)
+        # -------------------------------
+        retreat_traj2 = self.linear_segment(tasca[-1], X_home)
 
         # --- CONCATENAZIONE ---
-        full = np.vstack([approach, tasca, zip, retreat])
+        full = np.vstack([approach_traj1, zip, retreat_traj1, approach_traj2, tasca, retreat_traj2])
+
 
         return full
+
+    def linear_segment(self, p_start, p_end, num=40):
+        """
+        Genera una linea retta tra due punti 3D.
+        """
+        t = np.linspace(0, 1, num)
+        pts = p_start + np.outer(t, (p_end - p_start))
+        return pts
 
     
     def generate_pocket_square2(self, width=0.12, height=0.18, z=0.15, n_per_side=25, 
@@ -177,12 +187,7 @@ def main():
         full = node.build_full_trajectory()
 
         # Test con 3 punti
-        pts = np.array([
-            [0.4, 0.5, 0.45],
-            [0.5, 0.5, 0.45],
-            [0.6, 0.5, 0.45],
-            [0.7, 0.5, 0.45],
-        ])
+        pts = np.array(full)
         flat = [len(pts)] + pts.flatten().tolist()
         node.send_waypoint(np.array(flat))  # o adegua alla tua API attuale
 

@@ -72,6 +72,7 @@ def generate_launch_description():
             executable='punti_telecamera',
             name='tm5_generatore_punti',
             output='screen',
+            parameters=[{'robot_description': robot_desc}]
         ),
         
         Node(

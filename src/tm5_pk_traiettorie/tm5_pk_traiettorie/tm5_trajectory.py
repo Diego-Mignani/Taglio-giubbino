@@ -11,13 +11,10 @@ from sensor_msgs.msg import JointState
 from moveit_msgs.msg import RobotState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
-
-
 class TrajectoryManager(Node):
     def __init__(self):
         super().__init__("tm5_gestione_traiettoria")
         self.get_logger().info("TrajectoryManager avviato e in ascolto su /waypoint")
-        self.get_logger().info("### VERSIONE TRAJECTORY MANAGER 2026-03-09 ###")
 
         # URDF per la cinematica diretta (come prima)
         self.declare_parameter("robot_description", "")
@@ -75,17 +72,16 @@ class TrajectoryManager(Node):
         data = np.array(msg.data)
         N = int(data[0])
         coords = data[1:]
-
         pts = coords.reshape(N, 3)
 
-        self.build_and_publish(pts)
-
+        # invece di build_and_publish diretto → pianificazione asincrona
+        self.plan_cartesian_async(pts)
 
     # ----------------------------------------------------------
     # MOVEIT2 PLANNING via servizio cartesiano
     # ----------------------------------------------------------
-    def plan_cartesian(self, points):
-        self.get_logger().info("DEBUG: sono dentro plan_cartesian")
+    def plan_cartesian_async(self, points):
+        self.get_logger().info("DEBUG: sono dentro plan_cartesian_async")
         self.get_logger().info(f"Chiamo MoveIt con {len(points)} waypoint")
 
         req = GetCartesianPath.Request()
@@ -95,13 +91,8 @@ class TrajectoryManager(Node):
         req.jump_threshold = 0.0
         req.avoid_collisions = False
 
-
-
-
-        # Usa lo stato reale di Unity come start_state
-
-        # CONFIG DI TEST, FISSA
-        q_start = [0.0, -1.57, 1.57, 0.0, 0.0, 0.0]  # rad
+        # start_state di test
+        q_start = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
         rs = RobotState()
         rs.joint_state.name = self.joint_names
@@ -109,82 +100,71 @@ class TrajectoryManager(Node):
         req.start_state = rs
         self.get_logger().info(f"Start_state di TEST: {q_start}")
 
-
+        flat_xyz = []
         for p in points:
             pose = Pose()
             pose.position.x = float(p[0])
             pose.position.y = float(p[1])
             pose.position.z = float(p[2])
-
-            # TEST: niente orientazione “furba”
-            # 1) identità (end-effector allineato all’asse z del link)
-            pose.orientation.x = 0.0
-            pose.orientation.y = 0.0
-            pose.orientation.z = 0.0
-            pose.orientation.w = 1.0
-
+            pose.orientation.x = self.Q_down[0]
+            pose.orientation.y = self.Q_down[1]
+            pose.orientation.z = self.Q_down[2]
+            pose.orientation.w = self.Q_down[3]
             req.waypoints.append(pose)
 
+            flat_xyz.extend([pose.position.x, pose.position.y, pose.position.z, pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w])
+
+        msg_xyz = Float64MultiArray()
+        msg_xyz.data = flat_xyz
+        self.pub_to_unity.publish(msg_xyz)
 
         future = self.cartesian_client.call_async(req)
+        future.add_done_callback(self.cartesian_done_cb)
+        self.get_logger().info("[TM] Richiesta cartesiana inviata in async")
 
+        
+    def cartesian_done_cb(self, future):
         try:
-            self.get_logger().info("[TM] prima di spin_until_future_complete")
-            rclpy.spin_until_future_complete(self, future)
-            self.get_logger().info("[TM] dopo spin_until_future_complete")
-
+            res = future.result()
         except Exception as e:
-            self.get_logger().error(f"[TM] Eccezione in spin_until_future_complete: {e}")
-            return None
+            self.get_logger().error(f"[TM] Errore nella risposta di /compute_cartesian_path: {e}")
+            return
 
-        if not future.result():
-            self.get_logger().error("Chiamata a /compute_cartesian_path fallita (future.result() è None)")
-            return None
+        if res is None:
+            self.get_logger().error("[TM] future.result() è None")
+            return
 
-        res = future.result()
         self.get_logger().info(
-            f"MoveIt ha pianificato: fraction={res.fraction:.3f}, "
+            f"[TM] MoveIt ha pianificato: fraction={res.fraction:.3f}, "
             f"num_points={len(res.solution.joint_trajectory.points)}, "
             f"error_code={res.error_code.val}"
         )
 
-        if res.fraction < 0.99:
-            self.get_logger().warn(
-                f"Solo {res.fraction*100:.1f}% della traiettoria cartesiana pianificata"
-            )
-
         traj = res.solution.joint_trajectory
         if not traj.points:
-            self.get_logger().error("Traiettoria vuota da MoveIt2")
-            return None
+            self.get_logger().error("[TM] Traiettoria vuota da MoveIt2")
+            return
 
-        return traj
+        # qui possiamo riusare build_and_publish come “fase 2”
+        self.build_and_publish_from_traj(traj)
+
 
     # ----------------------------------------------------------
     # COSTRUZIONE TRAIETTORIA COMPLETA
     # ----------------------------------------------------------
-        
-    def build_and_publish(self, pts):
-        self.get_logger().info("[TM] build_and_publish: INIZIO")
-
-        # 1) Pianificazione MoveIt
-        traj = self.plan_cartesian(pts)
-
-        if traj is None:
-            self.get_logger().error("[TM] Errore nella pianificazione MoveIt2 (traj è None)")
-            return
+    def build_and_publish_from_traj(self, traj):
+        self.get_logger().info("[TM] build_and_publish_from_traj: INIZIO")
 
         if not hasattr(traj, "points") or traj.points is None:
             self.get_logger().error("[TM] ERRORE: traj.points è None!")
             return
 
-        self.get_logger().info(f"[TM] build_and_publish: traj.points={len(traj.points)}")
+        self.get_logger().info(f"[TM] build_and_publish_from_traj: traj.points={len(traj.points)}")
 
-        # 2) Pubblica verso il controller
         self.publish_joint_trajectory(traj)
-
         self.trajectory_ready = True
         self.get_logger().info(f"[TM] Traiettoria inviata ({len(traj.points)} punti).")
+
 # ----------------------------------------------------------
     # PUBBLICAZIONE VERSO IL CONTROLLER (come prima)
     # ----------------------------------------------------------
