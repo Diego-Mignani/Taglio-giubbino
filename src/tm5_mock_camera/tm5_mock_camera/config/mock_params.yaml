@@ -1,0 +1,8 @@
+mock_camera:
+  ros__parameters:
+    publish_rate: 1.0
+    mode: "zip"   # zip | pocket | both
+    num_points: 100
+    amplitude: 0.02
+    frequency: 3.0
+    noise: 0.002

@@ -1,6 +1,5 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
-from launch.substitutions import Command, FindExecutable, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
 import yaml
 import os
@@ -13,11 +12,11 @@ def load_yaml(package_name, file_path):
 
 def generate_launch_description():
 
-    robot_description = Command([
-        FindExecutable(name="xacro"),
-        " ",
-        PathJoinSubstitution([FindPackageShare("tm_description"), "urdf", "tm5-900.urdf"])
-    ])
+    # Carica URDF come stringa
+    pkg_path = FindPackageShare("tm_description").find("tm_description")
+    urdf_path = os.path.join(pkg_path, "urdf", "tm5-900.urdf")
+    with open(urdf_path, 'r') as infp:
+        robot_description = infp.read()
 
     robot_description_semantic = load_yaml(
         "tm5_moveit_config",

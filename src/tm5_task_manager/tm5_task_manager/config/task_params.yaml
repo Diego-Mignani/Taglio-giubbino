@@ -1,0 +1,26 @@
+task_manager:
+
+  ros__parameters:
+
+    # --- Modalità di esecuzione ---
+    use_sim: true        # true = Unity + PD controller, false = robot reale
+
+    # --- Pose predefinite ---
+    scan_pose:
+      position: [0.4, 0.0, 0.6]
+      orientation: [0.0, 0.0, 0.0, 1.0]
+
+    home_pose:
+      position: [0.3, 0.2, 0.5]
+      orientation: [0.0, 0.0, 0.0, 1.0]
+
+    # --- Timeout ---
+    wait_target_timeout: 5.0      # secondi per aspettare la telecamera
+    planning_timeout: 10.0        # secondi per MoveIt
+    execution_timeout: 20.0       # secondi per esecuzione traiettoria
+
+    # --- Parametri telecamera ---
+    camera_topic: "/tm5/camera/target_pose"
+
+    # --- Parametri logging ---
+    verbose: true

@@ -1,0 +1,5 @@
+sensor_msgs/JointState target_joints
+---
+trajectory_msgs/JointTrajectory trajectory
+bool success
+string message

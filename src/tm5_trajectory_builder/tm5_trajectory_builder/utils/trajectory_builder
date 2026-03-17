@@ -1,0 +1,42 @@
+from geometry_msgs.msg import Pose
+from .linear_segment import linear_cartesian_segment
+
+class TrajectoryBuilder:
+
+    def __init__(self, node):
+        self.node = node
+
+        self.approach_steps = node.get_parameter("approach_steps").value
+        self.retreat_steps  = node.get_parameter("retreat_steps").value
+        self.path_steps     = node.get_parameter("path_steps").value
+
+    def build(self, points: list[Pose], home_pose: Pose):
+        """
+        Costruisce la traiettoria completa:
+        approach → path → retreat
+        """
+
+        if len(points) < 2:
+            raise ValueError("TrajectoryBuilder: servono almeno 2 punti")
+
+        first = points[0]
+        last  = points[-1]
+
+        # Approach
+        approach = linear_cartesian_segment(home_pose, first, steps=self.approach_steps)
+
+        # Path principale
+        path = []
+        for i in range(len(points) - 1):
+            seg = linear_cartesian_segment(points[i], points[i+1], steps=self.path_steps)
+            path.extend(seg)
+
+        # Retreat
+        retreat = linear_cartesian_segment(last, home_pose, steps=self.retreat_steps)
+
+        # Traiettoria completa
+        full = approach + path + retreat
+
+        self.node.get_logger().info(f"Trajectory built: {len(full)} points")
+
+        return full

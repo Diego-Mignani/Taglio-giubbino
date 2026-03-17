@@ -1,15 +1,15 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
-from launch.substitutions import Command, FindExecutable, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
+import os
 
 def generate_launch_description():
 
-    pkg_share = FindPackageShare("tm5_moveit_config")
+    pkg_path = FindPackageShare("tm_description").find("tm_description")
+    urdf_path = os.path.join(pkg_path, "urdf", "tm5-900.urdf")
 
-    robot_description = PathJoinSubstitution(
-        [FindPackageShare("tm_description"), "urdf", "tm5-900.urdf"]
-    )
+    with open(urdf_path, 'r') as infp:
+        robot_desc = infp.read()
 
     return LaunchDescription([
         Node(
@@ -17,8 +17,7 @@ def generate_launch_description():
             executable="rviz2",
             output="screen",
             parameters=[
-                {"robot_description": Command([FindExecutable(name="xacro"), " ", robot_description])},
+                {"robot_description": robot_desc},
             ],
         )
     ])
-

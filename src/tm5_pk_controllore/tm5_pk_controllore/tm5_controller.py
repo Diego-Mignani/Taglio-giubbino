@@ -189,6 +189,8 @@ class RobotController(Node):
         self.control_flag = True
 
     def receive_trajectory(self, msg):
+        self.get_logger().info("Ricevuta traiettoria dal TrajectoryManager!")
+
         try:
             self.traiettoria_pronta = True
             self.traj_finita = False

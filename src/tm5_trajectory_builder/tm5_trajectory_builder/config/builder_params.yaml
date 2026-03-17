@@ -1,0 +1,13 @@
+trajectory_builder:
+  ros__parameters:
+
+    # Numero di punti per segmenti approach/retreat
+    approach_steps: 30
+    retreat_steps: 30
+
+    # Numero di punti per ogni segmento della zip/tasca
+    path_steps: 10
+
+    # Offset verticale per approach/retreat (se serve)
+    approach_offset: 0.05
+    retreat_offset: 0.05
