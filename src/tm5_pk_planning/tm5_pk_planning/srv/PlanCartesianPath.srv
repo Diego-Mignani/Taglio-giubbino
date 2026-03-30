@@ -1,0 +1,5 @@
+geometry_msgs/Pose[] cartesian_path
+---
+trajectory_msgs/JointTrajectory trajectory
+bool success
+string message

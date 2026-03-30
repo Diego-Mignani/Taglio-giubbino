@@ -2,7 +2,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 
-from tm5_pk_planning.srv import PlanToPose
+from tm5_pk_planning.srv import PlanCartesianPath
 from tm5_motion_interface.srv import MoveToPose, ExecuteTrajectory
 from geometry_msgs.msg import PoseArray
 from tm5_task_manager.fsm.build_trajectory_state import BuildTrajectoryState
@@ -30,7 +30,7 @@ class TaskManager(Node):
         self.current_trajectory = None
 
         # --- Client ---
-        self.plan_cli = self.create_client(PlanToPose, "plan_to_pose")
+        self.plan_cli = self.create_client(PlanCartesianPath, "plan_cartesian_path")
         self.exec_cli = self.create_client(ExecuteTrajectory, "execute_trajectory")
         self.move_pose_cli = self.create_client(MoveToPose, "move_to_pose")
 
